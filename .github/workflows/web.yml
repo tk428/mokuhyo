@@ -1,0 +1,49 @@
+name: Flutter Web Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.22.2'   # 固定
+
+      - name: Enable web
+        run: flutter config --enable-web
+
+      # web/ が無い場合は生成（index.html を用意）
+      - name: Ensure web directory exists
+        run: |
+          if [ ! -d "web" ]; then
+            flutter create . --platforms=web
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build web
+        run: flutter build web --release --base-href "/roulette/"
+        # 必要なら renderer 指定も可（Flutter が新しければ）
+        # run: flutter build web --release --web-renderer html --base-href "/roulette/"
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: build/web
+          force_orphan: true
