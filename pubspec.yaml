@@ -17,6 +17,7 @@ dependencies:
   hive_flutter: ^1.1.0
   path_provider: ^2.1.0
   google_mobile_ads: ^6.0.0
+  shared_preferences: ^2.5.5
 
 dev_dependencies:
   flutter_test:
