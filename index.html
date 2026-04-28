@@ -1,0 +1,775 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>できたシール</title>
+<style>
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:#f4f6f8;
+  color:#172033;
+  font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP",sans-serif;
+}
+.app{
+  max-width:430px;
+  margin:0 auto;
+  min-height:100vh;
+  padding:22px 16px 100px;
+}
+.screen{display:none}
+.screen.active{display:block}
+.date{
+  font-size:13px;
+  color:#718096;
+  font-weight:800;
+}
+h1{
+  margin:6px 0 20px;
+  font-size:34px;
+  letter-spacing:-.05em;
+}
+.top{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:18px;
+}
+.add{
+  width:48px;
+  height:48px;
+  border:0;
+  border-radius:50%;
+  background:#172033;
+  color:#fff;
+  font-size:31px;
+  line-height:1;
+  box-shadow:0 10px 28px rgba(20,30,50,.12);
+}
+.summary{
+  background:#fff;
+  border-radius:28px;
+  padding:18px;
+  box-shadow:0 10px 28px rgba(20,30,50,.08);
+  margin-bottom:24px;
+}
+.summaryLabel{
+  font-size:14px;
+  color:#64748b;
+  font-weight:900;
+}
+.summaryNum{
+  font-size:44px;
+  font-weight:950;
+  line-height:1;
+  margin:8px 0;
+}
+.summaryText{
+  font-size:13px;
+  color:#64748b;
+  font-weight:800;
+}
+.sectionTitle{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-end;
+  gap:12px;
+  margin:22px 4px 12px;
+}
+.sectionTitle h2{
+  margin:0;
+  font-size:22px;
+  letter-spacing:-.04em;
+}
+.sectionTitle span{
+  font-size:12px;
+  color:#7b8494;
+  font-weight:800;
+  white-space:nowrap;
+}
+.card{
+  background:#fff;
+  border-radius:26px;
+  padding:16px;
+  margin:12px 0;
+  box-shadow:0 10px 28px rgba(20,30,50,.08);
+  border:2px solid #e6edf5;
+}
+.card.done{
+  border-color:#c7f0d8;
+  opacity:.94;
+}
+.cardTop{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+}
+.name{
+  font-size:24px;
+  font-weight:950;
+  letter-spacing:-.04em;
+}
+.badge{
+  background:#eef2f7;
+  color:#64748b;
+  border-radius:999px;
+  padding:7px 10px;
+  font-size:12px;
+  font-weight:900;
+  white-space:nowrap;
+}
+.goalBox{
+  display:grid;
+  gap:8px;
+  margin-top:14px;
+}
+.goal{
+  border-radius:18px;
+  padding:12px;
+}
+.goal.main{background:#fff4c7}
+.goal.sub{background:#eafaf0}
+.goalLabel{
+  font-size:12px;
+  font-weight:950;
+  color:#64748b;
+  margin-bottom:3px;
+}
+.goalText{
+  font-size:17px;
+  font-weight:900;
+}
+.actions{
+  display:grid;
+  grid-template-columns:1fr 1fr 1fr;
+  gap:8px;
+  margin-top:14px;
+}
+button{
+  border:0;
+  border-radius:17px;
+  padding:12px 4px;
+  font-size:13px;
+  font-weight:950;
+  color:#273449;
+}
+button span{
+  display:block;
+  font-size:23px;
+  margin-bottom:2px;
+}
+.mainBtn{background:#fff3c4}
+.subBtn{background:#eafaf0}
+.missBtn{background:#eef2f7}
+.empty{
+  background:#fff;
+  border-radius:22px;
+  padding:18px;
+  text-align:center;
+  color:#7b8494;
+  font-weight:900;
+  box-shadow:0 8px 22px rgba(20,30,50,.06);
+}
+.memo{
+  margin-top:12px;
+  background:#f8fafc;
+  border-radius:18px;
+  padding:12px;
+  color:#64748b;
+  font-weight:800;
+  font-size:13px;
+}
+.selector{
+  display:flex;
+  gap:8px;
+  overflow-x:auto;
+  padding-bottom:8px;
+  margin-bottom:14px;
+}
+.chip{
+  border-radius:999px;
+  padding:10px 14px;
+  font-weight:900;
+  white-space:nowrap;
+  background:#fff;
+  color:#64748b;
+  box-shadow:0 5px 16px rgba(20,30,50,.06);
+}
+.chip.active{
+  background:#172033;
+  color:#fff;
+}
+.statGrid{
+  display:grid;
+  grid-template-columns:repeat(4,1fr);
+  gap:8px;
+  margin-top:16px;
+}
+.stat{
+  background:#f8fafc;
+  border-radius:18px;
+  padding:10px 6px;
+  text-align:center;
+}
+.statEmoji{font-size:21px}
+.statNum{
+  font-size:18px;
+  font-weight:950;
+}
+.statLabel{
+  font-size:10px;
+  color:#64748b;
+  font-weight:850;
+}
+.calendarCard{
+  background:#fff;
+  border-radius:28px;
+  padding:16px;
+  box-shadow:0 10px 28px rgba(20,30,50,.08);
+}
+.calHeader{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  margin-bottom:12px;
+}
+.calTitle{
+  font-size:20px;
+  font-weight:950;
+}
+.arrow{
+  width:36px;
+  height:36px;
+  border-radius:50%;
+  background:#f1f5f9;
+  font-size:18px;
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(7,1fr);
+  gap:7px;
+}
+.dow{
+  text-align:center;
+  color:#94a3b8;
+  font-size:11px;
+  font-weight:900;
+  padding:5px 0;
+}
+.day{
+  aspect-ratio:1/1;
+  border-radius:15px;
+  background:#f8fafc;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  align-items:center;
+  gap:1px;
+  font-weight:900;
+  color:#64748b;
+}
+.day.today{
+  outline:3px solid #4fc3f7;
+  outline-offset:2px;
+}
+.day.empty{background:transparent}
+.emoji{
+  font-size:21px;
+  line-height:1;
+}
+.num{font-size:10px}
+.legend{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-top:14px;
+}
+.legendItem{
+  background:#f8fafc;
+  border-radius:16px;
+  padding:10px;
+  font-size:12px;
+  font-weight:850;
+  color:#475569;
+}
+.percentBox{margin-top:14px}
+.percentLabel{
+  font-size:12px;
+  color:#64748b;
+  font-weight:800;
+  margin-bottom:6px;
+}
+.percentBar{
+  height:12px;
+  background:#e5e7eb;
+  border-radius:999px;
+  overflow:hidden;
+}
+.percentFill{
+  height:100%;
+  background:#4fc3f7;
+}
+.percentText{
+  margin-top:4px;
+  font-size:12px;
+  font-weight:900;
+  color:#0369a1;
+}
+.streak{
+  background:#fff3c4;
+  padding:6px 10px;
+  border-radius:999px;
+  font-weight:900;
+}
+.stats{
+  display:flex;
+  gap:12px;
+  margin-top:12px;
+  font-weight:900;
+}
+.twoActions{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-top:14px;
+}
+.secondary{
+  background:#eef2f7;
+}
+.primary{
+  background:#eaf8ff;
+  color:#0369a1;
+}
+.createBox{
+  background:linear-gradient(135deg,#fff,#eefaff);
+  border-radius:28px;
+  padding:18px;
+  box-shadow:0 10px 28px rgba(20,30,50,.08);
+  margin-top:18px;
+  border:2px dashed #bfdbfe;
+}
+.createTitle{
+  font-size:20px;
+  font-weight:950;
+  margin-bottom:6px;
+}
+.createText{
+  color:#64748b;
+  font-size:13px;
+  font-weight:800;
+  line-height:1.55;
+}
+.bottom{
+  position:fixed;
+  left:50%;
+  bottom:0;
+  transform:translateX(-50%);
+  width:min(430px,100%);
+  background:rgba(255,255,255,.92);
+  backdrop-filter:blur(16px);
+  border-top:1px solid #e5e7eb;
+  padding:10px 16px 24px;
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:8px;
+}
+.nav{
+  background:transparent;
+  color:#64748b;
+  font-size:12px;
+}
+.nav.active{
+  background:#eaf8ff;
+  color:#0369a1;
+}
+.nav span{
+  display:block;
+  font-size:22px;
+  margin-bottom:2px;
+}
+.modal{
+  position:fixed;
+  inset:0;
+  background:rgba(0,0,0,.28);
+  display:none;
+  align-items:flex-end;
+  z-index:20;
+}
+.modal.active{display:flex}
+.sheet{
+  width:100%;
+  max-width:430px;
+  margin:0 auto;
+  background:#fff;
+  border-radius:28px 28px 0 0;
+  padding:20px 16px 24px;
+}
+.sheet h2{
+  margin:0 0 12px;
+  text-align:center;
+}
+textarea,input{
+  width:100%;
+  border:0;
+  background:#f8fafc;
+  border-radius:18px;
+  padding:13px;
+  font-size:16px;
+  font-family:inherit;
+  margin:8px 0;
+}
+.bigButton{
+  width:100%;
+  background:#172033;
+  color:#fff;
+  margin-top:10px;
+}
+</style>
+</head>
+<body>
+
+<main class="app">
+  <section id="today" class="screen active">
+    <div class="top">
+      <div>
+        <div class="date">午前3:00切り替え</div>
+        <h1>今日の記録</h1>
+      </div>
+      <button class="add" onclick="openCreate()">＋</button>
+    </div>
+
+    <div class="summary">
+      <div class="summaryLabel">まだ記録していない目標</div>
+      <div class="summaryNum"><span id="remainCount">4</span> <span style="font-size:18px;">個</span></div>
+      <div class="summaryText">下のカードから、本目標・サブ目標・未達を選ぶ</div>
+    </div>
+
+    <div class="sectionTitle">
+      <h2>未達成・未記録</h2>
+      <span>今日まだ押していない目標</span>
+    </div>
+    <div id="unrecorded"></div>
+
+    <div class="sectionTitle">
+      <h2>記録済み</h2>
+      <span>押し直しで変更可能</span>
+    </div>
+    <div id="recorded"></div>
+  </section>
+
+  <section id="calendar" class="screen">
+    <div class="date">スタンプ帳</div>
+    <h1>カレンダー</h1>
+
+    <div class="selector">
+      <button class="chip active">筋トレ</button>
+      <button class="chip">読書</button>
+      <button class="chip">英語</button>
+      <button class="chip">アプリ開発</button>
+    </div>
+
+    <section class="summary">
+      <div class="cardTop">
+        <div>
+          <div class="name">筋トレ</div>
+          <div class="summaryText">本目標：30分筋トレ / サブ：1分筋トレ</div>
+        </div>
+        <div style="font-size:32px;">🏋️</div>
+      </div>
+
+      <div class="statGrid">
+        <div class="stat"><div class="statEmoji">🌟</div><div class="statNum">12</div><div class="statLabel">本目標</div></div>
+        <div class="stat"><div class="statEmoji">✅</div><div class="statNum">8</div><div class="statLabel">サブ</div></div>
+        <div class="stat"><div class="statEmoji">🐌</div><div class="statNum">5</div><div class="statLabel">未記録</div></div>
+        <div class="stat"><div class="statEmoji">☁️</div><div class="statNum">3</div><div class="statLabel">未達</div></div>
+      </div>
+    </section>
+
+    <section class="calendarCard">
+      <div class="calHeader">
+        <button class="arrow">‹</button>
+        <div class="calTitle">2026年4月</div>
+        <button class="arrow">›</button>
+      </div>
+
+      <div class="grid" id="calGrid"></div>
+
+      <div class="legend">
+        <div class="legendItem">🌟 本目標達成</div>
+        <div class="legendItem">✅ サブ目標達成</div>
+        <div class="legendItem">🐌🫠🌧️ 未記録</div>
+        <div class="legendItem">☁️ 未達</div>
+      </div>
+    </section>
+  </section>
+
+  <section id="goals" class="screen">
+    <div class="top">
+      <div>
+        <div class="date">設定中の目標</div>
+        <h1>目標</h1>
+      </div>
+      <button class="add" onclick="openCreate()">＋</button>
+    </div>
+
+    <section class="summary">
+      <div class="summaryLabel">現在走っている目標</div>
+      <div class="statGrid" style="grid-template-columns:repeat(3,1fr)">
+        <div class="stat"><div class="statNum">4</div><div class="statLabel">有効</div></div>
+        <div class="stat"><div class="statNum">128</div><div class="statLabel">累計シール</div></div>
+        <div class="stat"><div class="statNum">60%</div><div class="statLabel">本目標率</div></div>
+      </div>
+    </section>
+
+    <div class="sectionTitle">
+      <h2>目標一覧</h2>
+      <span>編集・停止・再開</span>
+    </div>
+
+    <div id="goalList"></div>
+
+    <section class="createBox">
+      <div class="createTitle">新しい目標を作る</div>
+      <div class="createText">
+        目標名、本目標、サブ目標を決めるだけ。サブ目標は「絶対できるくらい小さく」するのがコツ。
+      </div>
+      <button class="bigButton" onclick="openCreate()">＋ 目標を追加</button>
+    </section>
+  </section>
+</main>
+
+<nav class="bottom">
+  <button class="nav active" data-target="today"><span>🏠</span>今日</button>
+  <button class="nav" data-target="calendar"><span>🗓</span>カレンダー</button>
+  <button class="nav" data-target="goals"><span>🎯</span>目標</button>
+</nav>
+
+<div id="memoModal" class="modal">
+  <div class="sheet">
+    <h2 id="memoTitle">記録</h2>
+    <textarea id="memoText" rows="3" placeholder="一言メモ（任意）"></textarea>
+    <button class="bigButton" onclick="saveRecord()">記録する</button>
+    <button class="secondary" style="width:100%;margin-top:8px;" onclick="closeMemo()">キャンセル</button>
+  </div>
+</div>
+
+<div id="createModal" class="modal">
+  <div class="sheet">
+    <h2>目標を作る</h2>
+    <input id="goalName" placeholder="目標名　例：筋トレ">
+    <input id="goalMain" placeholder="本目標　例：30分筋トレ">
+    <input id="goalSub" placeholder="サブ目標　例：1分筋トレ">
+    <input id="goalTime" placeholder="通知時間　例：21:00">
+    <button class="bigButton" onclick="addGoal()">作成する</button>
+    <button class="secondary" style="width:100%;margin-top:8px;" onclick="closeCreate()">キャンセル</button>
+  </div>
+</div>
+
+<script>
+let goals = [
+  {id:1,name:'筋トレ',main:'30分筋トレ',sub:'1分筋トレ',status:null,memo:'',active:true,percent:60,mainCount:18,subCount:7,streak:6},
+  {id:2,name:'読書',main:'本を30分読む',sub:'1ページだけ読む',status:null,memo:'',active:true,percent:80,mainCount:24,subCount:4,streak:10},
+  {id:3,name:'英語',main:'英語を20分勉強する',sub:'英単語を1個見る',status:null,memo:'',active:true,percent:43,mainCount:13,subCount:9,streak:3},
+  {id:4,name:'アプリ開発',main:'Flutterを30分触る',sub:'コードを1行だけ見る',status:null,memo:'',active:true,percent:30,mainCount:9,subCount:8,streak:2}
+];
+
+let pendingId = null;
+let pendingStatus = null;
+
+const label = {
+  main:'🌟 本目標達成',
+  sub:'✅ サブ目標達成',
+  miss:'☁️ 未達成'
+};
+
+function renderToday(){
+  const un = document.getElementById('unrecorded');
+  const rec = document.getElementById('recorded');
+  const unrecorded = goals.filter(g=>g.active && !g.status);
+  const recorded = goals.filter(g=>g.active && g.status);
+
+  document.getElementById('remainCount').textContent = unrecorded.length;
+
+  un.innerHTML = unrecorded.length ? unrecorded.map(cardToday).join('') :
+    '<div class="empty">今日の未記録はありません</div>';
+
+  rec.innerHTML = recorded.length ? recorded.map(cardRecorded).join('') :
+    '<div class="empty">まだ記録済みはありません</div>';
+}
+
+function cardToday(g){
+  return `
+  <article class="card">
+    <div class="cardTop">
+      <div class="name">${g.name}</div>
+      <div class="badge">未記録</div>
+    </div>
+    <div class="goalBox">
+      <div class="goal main"><div class="goalLabel">本目標</div><div class="goalText">${g.main}</div></div>
+      <div class="goal sub"><div class="goalLabel">サブ目標</div><div class="goalText">${g.sub}</div></div>
+    </div>
+    <div class="actions">
+      <button class="mainBtn" onclick="openMemo(${g.id},'main')"><span>🌟</span>本目標</button>
+      <button class="subBtn" onclick="openMemo(${g.id},'sub')"><span>✅</span>サブ</button>
+      <button class="missBtn" onclick="openMemo(${g.id},'miss')"><span>☁️</span>未達</button>
+    </div>
+  </article>`;
+}
+
+function cardRecorded(g){
+  return `
+  <article class="card done">
+    <div class="cardTop">
+      <div class="name">${g.name}</div>
+      <div class="badge">${label[g.status]}</div>
+    </div>
+    ${g.memo ? `<div class="memo">${g.memo}</div>` : `<div class="memo">メモなしで記録</div>`}
+    <div class="actions">
+      <button class="mainBtn" onclick="openMemo(${g.id},'main')"><span>🌟</span>本目標</button>
+      <button class="subBtn" onclick="openMemo(${g.id},'sub')"><span>✅</span>サブ</button>
+      <button class="missBtn" onclick="openMemo(${g.id},'miss')"><span>☁️</span>未達</button>
+    </div>
+  </article>`;
+}
+
+function renderGoals(){
+  const list = document.getElementById('goalList');
+  list.innerHTML = goals.map(g => `
+    <article class="card">
+      <div class="cardTop">
+        <div class="name">${g.name}</div>
+        <div class="streak">🔥 ${g.streak}日</div>
+      </div>
+
+      <div class="percentBox">
+        <div class="percentLabel">本目標達成率（直近30日）</div>
+        <div class="percentBar">
+          <div class="percentFill" style="width:${g.percent}%"></div>
+        </div>
+        <div class="percentText">${g.percent}%（${g.mainCount} / 30日）</div>
+      </div>
+
+      <div class="stats">
+        <div>🌟 ${g.mainCount}</div>
+        <div>✅ ${g.subCount}</div>
+      </div>
+
+      <div class="goalBox">
+        <div class="goal main"><div class="goalLabel">本目標</div><div class="goalText">${g.main}</div></div>
+        <div class="goal sub"><div class="goalLabel">サブ目標</div><div class="goalText">${g.sub}</div></div>
+      </div>
+
+      <div class="twoActions">
+        <button class="primary" onclick="showScreen('calendar')">カレンダーを見る</button>
+        <button class="secondary" onclick="toggleActive(${g.id})">${g.active ? '停止' : '再開'}</button>
+      </div>
+    </article>
+  `).join('');
+}
+
+function renderCalendar(){
+  const grid = document.getElementById('calGrid');
+  const stamps = ['','','','🌟','✅','🐌','🌟','✅','🌧️','🌟','✅','🌟','🫠','✅','🌟','☁️','🌟','✅','🌟','🌟','🐌','✅','🌟','✅','🌧️','🌟','✅','🌟','☁️','・','・','・','',''];
+  const dows = ['日','月','火','水','木','金','土'];
+  grid.innerHTML = dows.map(d=>`<div class="dow">${d}</div>`).join('');
+  for(let i=0;i<35;i++){
+    const day = i - 2;
+    if(day < 1 || day > 30){
+      grid.innerHTML += `<div class="day empty"></div>`;
+    }else{
+      const s = stamps[i] || '・';
+      const today = day === 27 ? 'today' : '';
+      grid.innerHTML += `<div class="day ${today}"><div class="emoji">${s}</div><div class="num">${day}</div></div>`;
+    }
+  }
+}
+
+function openMemo(id,status){
+  pendingId = id;
+  pendingStatus = status;
+  document.getElementById('memoTitle').textContent = label[status];
+  document.getElementById('memoText').value = '';
+  document.getElementById('memoModal').classList.add('active');
+}
+
+function closeMemo(){
+  document.getElementById('memoModal').classList.remove('active');
+}
+
+function saveRecord(){
+  const g = goals.find(x=>x.id===pendingId);
+  if(g){
+    g.status = pendingStatus;
+    g.memo = document.getElementById('memoText').value.trim();
+  }
+  closeMemo();
+  renderAll();
+}
+
+function openCreate(){
+  document.getElementById('createModal').classList.add('active');
+}
+
+function closeCreate(){
+  document.getElementById('createModal').classList.remove('active');
+}
+
+function addGoal(){
+  const name = document.getElementById('goalName').value.trim();
+  const main = document.getElementById('goalMain').value.trim();
+  const sub = document.getElementById('goalSub').value.trim();
+  if(!name || !main || !sub){
+    alert('目標名・本目標・サブ目標を入れてください');
+    return;
+  }
+  goals.push({
+    id:Date.now(),
+    name,
+    main,
+    sub,
+    status:null,
+    memo:'',
+    active:true,
+    percent:0,
+    mainCount:0,
+    subCount:0,
+    streak:0
+  });
+  document.getElementById('goalName').value='';
+  document.getElementById('goalMain').value='';
+  document.getElementById('goalSub').value='';
+  document.getElementById('goalTime').value='';
+  closeCreate();
+  renderAll();
+}
+
+function toggleActive(id){
+  const g = goals.find(x=>x.id===id);
+  g.active = !g.active;
+  renderAll();
+}
+
+function showScreen(id){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  document.querySelectorAll('.nav').forEach(n=>n.classList.remove('active'));
+  document.querySelector(`.nav[data-target="${id}"]`).classList.add('active');
+  window.scrollTo(0,0);
+}
+
+document.querySelectorAll('.nav').forEach(btn=>{
+  btn.addEventListener('click',()=>showScreen(btn.dataset.target));
+});
+
+function renderAll(){
+  renderToday();
+  renderGoals();
+  renderCalendar();
+}
+
+renderAll();
+</script>
+</body>
+</html>
