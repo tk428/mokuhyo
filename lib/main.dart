@@ -1,3517 +1,1872 @@
-// ===== BLOCK 1: imports & main =====
-import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:hive_flutter/hive_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:google_mobile_ads/google_mobile_ads.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
-import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform, kIsWeb;
-
-// ===== UTIL: color tweak (used by _HomeWheelPainter) =====
-Future<void> main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-
-  await SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-  ]);
-
-  // ✅ Hive 初期化 & Box オープン
-  await Hive.initFlutter();
-  await Hive.openBox('roulette_box');
-
-  // ✅ Web では広告SDKを一切触らない
-  if (!kIsWeb &&
-      (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.iOS)) {
-    await MobileAds.instance.initialize();
-    // Interstitials.preload(); // 使うならここで
-  }
-
-  runApp(const RouletteApp());
+  runApp(const MokuhyoApp());
 }
 
+const Color kBg = Color(0xFFF4F6F8);
+const Color kText = Color(0xFF172033);
+const Color kMuted = Color(0xFF64748B);
+const Color kBlue = Color(0xFF4FC3F7);
+const Color kBlueSoft = Color(0xFFEAF8FF);
+const Color kYellow = Color(0xFFFFF3C4);
+const Color kGreen = Color(0xFFEAFaf0);
+const Color kGray = Color(0xFFEEF2F7);
 
-Color _shade(
-    Color c, {
-      double lightnessDelta = -0.08,
-    }) {
-  final hsl = HSLColor.fromColor(c);
-  final l = (hsl.lightness + lightnessDelta).clamp(0.0, 1.0);
-  return hsl.withLightness(l).toColor();
+const List<String> kAutoStamps = ['🐌', '🫠', '🌧️', '😴', '🍵'];
+
+String dateKey(DateTime d) {
+  final y = d.year.toString().padLeft(4, '0');
+  final m = d.month.toString().padLeft(2, '0');
+  final day = d.day.toString().padLeft(2, '0');
+  return '$y-$m-$day';
 }
 
-class RouletteApp extends StatelessWidget {
-  const RouletteApp({super.key});
+DateTime parseDateKey(String key) {
+  final p = key.split('-').map(int.parse).toList();
+  return DateTime(p[0], p[1], p[2]);
+}
 
-  @override
-  Widget build(BuildContext context) {
-    // 明るめの水色
-    const mainBlue = Color(0xFF4FC3F7);
+DateTime businessToday() {
+  final now = DateTime.now().subtract(const Duration(hours: 3));
+  return DateTime(now.year, now.month, now.day);
+}
 
-    // fromSeed で作ってから「primary だけはこの色！」と上書き
-    final base = ColorScheme.fromSeed(
-      seedColor: mainBlue,
-      brightness: Brightness.light,
-    );
+String businessTodayKey() => dateKey(businessToday());
 
-    final scheme = base.copyWith(
-      primary: mainBlue,
-      primaryContainer: mainBlue.withOpacity(0.18),
-      secondary: mainBlue,
-      secondaryContainer: mainBlue.withOpacity(0.12),
-    );
+String monthTitle(DateTime d) => '${d.year}年${d.month}月';
 
-    return MaterialApp(
-      title: 'ルーレットをつくろう',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: scheme,
-        scaffoldBackgroundColor: scheme.background,
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: scheme.primary,
-            foregroundColor: scheme.onPrimary,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(20),
-            ),
-            textStyle: const TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-        ),
-        textButtonTheme: TextButtonThemeData(
-          style: TextButton.styleFrom(
-            foregroundColor: scheme.primary,
-          ),
-        ),
-        outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-            foregroundColor: scheme.primary,
-            side: BorderSide(
-              color: scheme.primary,
-              width: 1.4,
-            ),
-          ),
-        ),
-      ),
-      home: const RootPage(),
-    );
+String randomAutoStamp(String seed) {
+  final index = seed.codeUnits.fold<int>(0, (a, b) => a + b) % kAutoStamps.length;
+  return kAutoStamps[index];
+}
+
+enum RecordStatus {
+  main,
+  sub,
+  miss,
+  auto,
+}
+
+String statusLabel(RecordStatus s) {
+  switch (s) {
+    case RecordStatus.main:
+      return '本目標達成';
+    case RecordStatus.sub:
+      return 'サブ目標達成';
+    case RecordStatus.miss:
+      return '未達成';
+    case RecordStatus.auto:
+      return '未記録';
   }
 }
 
-// ===== BLOCK 2: models & storage =====
+String statusEmoji(RecordStatus s, {String? autoStamp}) {
+  switch (s) {
+    case RecordStatus.main:
+      return '🌟';
+    case RecordStatus.sub:
+      return '✅';
+    case RecordStatus.miss:
+      return '☁️';
+    case RecordStatus.auto:
+      return autoStamp ?? '🐌';
+  }
+}
 
-class RouletteItem {
-  final String name;
-  final int weight;
-  final int color;
-
-  RouletteItem({
-    required this.name,
-    required this.weight,
-    required this.color,
-  });
-
-  Map<String, dynamic> toJson() => {
-    "name": name,
-    "weight": weight,
-    "color": color,
-  };
-
-  static RouletteItem fromJson(Map<String, dynamic> j) => RouletteItem(
-    name: j["name"],
-    weight: j["weight"],
-    color: j["color"],
+RecordStatus statusFromString(String s) {
+  return RecordStatus.values.firstWhere(
+    (e) => e.name == s,
+    orElse: () => RecordStatus.auto,
   );
 }
 
-class RouletteDef {
-  final String id;
-  final String title;
-  final List<RouletteItem> items;
-  final String createdAt;
-  final String updatedAt;
-  final String? lastUsedAt;
-  final bool isPinned;
-
-  RouletteDef({
+class Goal {
+  Goal({
     required this.id,
-    required this.title,
-    required this.items,
-    required this.createdAt,
-    required this.updatedAt,
-    this.lastUsedAt,
-    this.isPinned = false,
+    required this.name,
+    required this.mainTarget,
+    required this.subTarget,
+    required this.createdDateKey,
+    this.notificationTime = '21:00',
+    this.isActive = true,
   });
+
+  final String id;
+  String name;
+  String mainTarget;
+  String subTarget;
+  String createdDateKey;
+  String notificationTime;
+  bool isActive;
 
   Map<String, dynamic> toJson() => {
-    "id": id,
-    "title": title,
-    "items": items.map((e) => e.toJson()).toList(),
-    "createdAt": createdAt,
-    "updatedAt": updatedAt,
-    "lastUsedAt": lastUsedAt,
-    "isPinned": isPinned,
-  };
+        'id': id,
+        'name': name,
+        'mainTarget': mainTarget,
+        'subTarget': subTarget,
+        'createdDateKey': createdDateKey,
+        'notificationTime': notificationTime,
+        'isActive': isActive,
+      };
 
-  static RouletteDef fromJson(Map<String, dynamic> j) => RouletteDef(
-    id: j["id"],
-    title: j["title"],
-    items: (j["items"] as List)
-        .map((e) => RouletteItem.fromJson(
-      Map<String, dynamic>.from(e),
-    ))
-        .toList(),
-    createdAt: j["createdAt"],
-    updatedAt: j["updatedAt"],
-    lastUsedAt: j["lastUsedAt"],
-    isPinned: j["isPinned"] ?? false,
-  );
-}
-
-// ルーレット時間モード
-enum RouletteTimeMode {
-  short, // 短い
-  normal, // 普通
-  long, // 長い
-}
-
-// アプリ全体の設定
-class AppSettings {
-  final bool privateMode; // プライベートモード
-  final bool quickResult; // 結果をすぐ表示
-  final RouletteTimeMode timeMode; // ルーレット時間
-
-  const AppSettings({
-    this.privateMode = false,
-    this.quickResult = false,
-    this.timeMode = RouletteTimeMode.normal,
-  });
-
-  AppSettings copyWith({
-    bool? privateMode,
-    bool? quickResult,
-    RouletteTimeMode? timeMode,
-  }) {
-    return AppSettings(
-      privateMode: privateMode ?? this.privateMode,
-      quickResult: quickResult ?? this.quickResult,
-      timeMode: timeMode ?? this.timeMode,
+  factory Goal.fromJson(Map<String, dynamic> json) {
+    return Goal(
+      id: json['id'] as String,
+      name: json['name'] as String? ?? '',
+      mainTarget: json['mainTarget'] as String? ?? '',
+      subTarget: json['subTarget'] as String? ?? '',
+      createdDateKey: json['createdDateKey'] as String? ?? businessTodayKey(),
+      notificationTime: json['notificationTime'] as String? ?? '21:00',
+      isActive: json['isActive'] as bool? ?? true,
     );
   }
+}
+
+class GoalRecord {
+  GoalRecord({
+    required this.goalId,
+    required this.dateKey,
+    required this.status,
+    this.memo = '',
+    this.autoStamp,
+  });
+
+  final String goalId;
+  final String dateKey;
+  RecordStatus status;
+  String memo;
+  String? autoStamp;
+
+  String get key => '$goalId|$dateKey';
 
   Map<String, dynamic> toJson() => {
-    'privateMode': privateMode,
-    'quickResult': quickResult,
-    'timeMode': timeMode.name, // "short" / "normal" / "long"
-  };
+        'goalId': goalId,
+        'dateKey': dateKey,
+        'status': status.name,
+        'memo': memo,
+        'autoStamp': autoStamp,
+      };
 
-  static AppSettings fromJson(Map<String, dynamic> j) {
-    final modeStr = j['timeMode'] as String?;
-    RouletteTimeMode mode;
+  factory GoalRecord.fromJson(Map<String, dynamic> json) {
+    return GoalRecord(
+      goalId: json['goalId'] as String,
+      dateKey: json['dateKey'] as String,
+      status: statusFromString(json['status'] as String? ?? 'auto'),
+      memo: json['memo'] as String? ?? '',
+      autoStamp: json['autoStamp'] as String?,
+    );
+  }
+}
 
-    switch (modeStr) {
-      case 'short':
-        mode = RouletteTimeMode.short;
-        break;
-      case 'long':
-        mode = RouletteTimeMode.long;
-        break;
-      default:
-        mode = RouletteTimeMode.normal;
+class AppState extends ChangeNotifier {
+  static const _goalsKey = 'mokuhyo_goals_v1';
+  static const _recordsKey = 'mokuhyo_records_v1';
+
+  final List<Goal> goals = [];
+  final Map<String, GoalRecord> records = {};
+
+  bool loaded = false;
+
+  List<Goal> get activeGoals => goals.where((g) => g.isActive).toList();
+  List<Goal> get stoppedGoals => goals.where((g) => !g.isActive).toList();
+
+  Future<void> load() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    final goalsRaw = prefs.getString(_goalsKey);
+    final recordsRaw = prefs.getString(_recordsKey);
+
+    goals.clear();
+    records.clear();
+
+    if (goalsRaw != null && goalsRaw.isNotEmpty) {
+      final list = jsonDecode(goalsRaw) as List<dynamic>;
+      goals.addAll(list.map((e) => Goal.fromJson(e as Map<String, dynamic>)));
     }
 
-    return AppSettings(
-      privateMode: j['privateMode'] ?? false,
-      quickResult: j['quickResult'] ?? false,
-      timeMode: mode,
-    );
-  }
-}
-
-class Store {
-  static const _kLast = "last_roulette";
-  static const _kSaved = "saved_roulettes";
-  static const _kSettings = "app_settings";
-  static const _kSeededDefault = "seeded_default_omikuji";
-
-  // ★ 追加：Hive の Box 名
-  static const _boxName = 'roulette_box';
-
-  // ★ 保存できるルーレットの最大数（既存のまま）
-  static const int kMaxSavedRoulettes = 10;
-
-  // 内部用ヘルパー：常に同じ Box を使う
-  static Box _box() {
-    return Hive.box(_boxName);
-  }
-
-  // ===== デフォルトおみくじ =====
-
-  // デフォルトおみくじを投入済みか？
-  static Future<bool> hasSeededDefault() async {
-    final box = _box();
-    return (box.get(_kSeededDefault, defaultValue: false) as bool);
-  }
-
-  // デフォルトおみくじを投入済みフラグを立てる
-  static Future<void> setSeededDefault() async {
-    final box = _box();
-    await box.put(_kSeededDefault, true);
-  }
-
-  // ===== 前回のルーレット =====
-
-  static Future<Map<String, dynamic>?> loadLast() async {
-    final box = _box();
-    final s = box.get(_kLast) as String?;
-    if (s == null) return null;
-    return Map<String, dynamic>.from(jsonDecode(s));
-  }
-
-  // ★ デフォルトの「今日の運勢」ルーレット
-  static RouletteDef defaultOmikuji() {
-    final now = DateTime.now().toIso8601String();
-    return RouletteDef(
-      id: 'default_omikuji',
-      title: '🍀 今日の運勢',
-      items: [
-        RouletteItem(name: '大吉', weight: 6, color: Colors.redAccent.value),
-        RouletteItem(name: '中吉', weight: 5, color: Colors.orangeAccent.value),
-        RouletteItem(name: '小吉', weight: 5, color: Colors.yellow.shade700.value),
-        RouletteItem(name: '吉',   weight: 8, color: Colors.lightGreen.shade600.value),
-        RouletteItem(name: '末吉', weight: 3, color: Colors.blueAccent.value),
-        RouletteItem(name: '凶',   weight: 1, color: Colors.grey.shade700.value),
-      ],
-      createdAt: now,
-      updatedAt: now,
-      lastUsedAt: null,
-      isPinned: true,
-    );
-  }
-
-  // ★ プライベートモード中は last を保存しない
-  static Future<void> saveLast(RouletteDef def) async {
-    final box = _box();
-
-    final settingsStr = box.get(_kSettings) as String?;
-    if (settingsStr != null) {
-      final st = AppSettings.fromJson(
-        Map<String, dynamic>.from(jsonDecode(settingsStr)),
-      );
-      if (st.privateMode) {
-        // プライベートモード中なので「前回のルーレット」は更新しない
-        return;
+    if (recordsRaw != null && recordsRaw.isNotEmpty) {
+      final list = jsonDecode(recordsRaw) as List<dynamic>;
+      for (final e in list) {
+        final record = GoalRecord.fromJson(e as Map<String, dynamic>);
+        records[record.key] = record;
       }
     }
 
-    await box.put(_kLast, jsonEncode(def.toJson()));
+    _autoFillUnrecordedDays();
+    loaded = true;
+    await save();
+    notifyListeners();
   }
 
-  // ===== 保存済みルーレット =====
+  Future<void> save() async {
+    final prefs = await SharedPreferences.getInstance();
 
-  static Future<List<RouletteDef>> loadSaved() async {
-    final box = _box();
-    final list = (box.get(_kSaved) as List?)?.cast<String>() ?? <String>[];
+    final goalsJson = jsonEncode(goals.map((g) => g.toJson()).toList());
+    final recordsJson = jsonEncode(records.values.map((r) => r.toJson()).toList());
 
-    return list
-        .map(
-          (s) => RouletteDef.fromJson(
-        Map<String, dynamic>.from(jsonDecode(s)),
-      ),
-    )
-        .toList();
+    await prefs.setString(_goalsKey, goalsJson);
+    await prefs.setString(_recordsKey, recordsJson);
   }
 
-  static Future<void> saveSaved(List<RouletteDef> defs) async {
-    final box = _box();
-    final list = defs.map((d) => jsonEncode(d.toJson())).toList();
-    await box.put(_kSaved, list);
+  void _autoFillUnrecordedDays() {
+    final today = businessToday();
+
+    for (final goal in goals.where((g) => g.isActive)) {
+      DateTime d = parseDateKey(goal.createdDateKey);
+
+      while (d.isBefore(today)) {
+        final key = '${goal.id}|${dateKey(d)}';
+
+        if (!records.containsKey(key)) {
+          final stamp = randomAutoStamp(key);
+          records[key] = GoalRecord(
+            goalId: goal.id,
+            dateKey: dateKey(d),
+            status: RecordStatus.auto,
+            autoStamp: stamp,
+          );
+        }
+
+        d = d.add(const Duration(days: 1));
+      }
+    }
   }
 
-  // ===== アプリ設定 =====
+  GoalRecord? recordFor(String goalId, String dayKey) {
+    return records['$goalId|$dayKey'];
+  }
 
-  static Future<AppSettings> loadSettings() async {
-    final box = _box();
-    final s = box.get(_kSettings) as String?;
-    if (s == null) return const AppSettings();
-
-    return AppSettings.fromJson(
-      Map<String, dynamic>.from(jsonDecode(s)),
+  Future<void> upsertRecord({
+    required String goalId,
+    required String dayKey,
+    required RecordStatus status,
+    String memo = '',
+    String? autoStamp,
+  }) async {
+    records['$goalId|$dayKey'] = GoalRecord(
+      goalId: goalId,
+      dateKey: dayKey,
+      status: status,
+      memo: memo,
+      autoStamp: autoStamp,
     );
+    notifyListeners();
+    await save();
   }
 
-  static Future<void> saveSettings(AppSettings settings) async {
-    final box = _box();
-    await box.put(_kSettings, jsonEncode(settings.toJson()));
+  Future<void> addGoal({
+    required String name,
+    required String mainTarget,
+    required String subTarget,
+    required String notificationTime,
+  }) async {
+    final id = DateTime.now().microsecondsSinceEpoch.toString();
+    goals.add(
+      Goal(
+        id: id,
+        name: name,
+        mainTarget: mainTarget,
+        subTarget: subTarget,
+        notificationTime: notificationTime,
+        createdDateKey: businessTodayKey(),
+      ),
+    );
+    notifyListeners();
+    await save();
+  }
+
+  Future<void> updateGoal(Goal goal) async {
+    notifyListeners();
+    await save();
+  }
+
+  Future<void> stopGoal(Goal goal) async {
+    goal.isActive = false;
+    notifyListeners();
+    await save();
+  }
+
+  Future<void> resumeGoal(Goal goal) async {
+    goal.isActive = true;
+    notifyListeners();
+    await save();
+  }
+
+  int countMainLast30(Goal goal) {
+    return _last30Records(goal).where((r) => r?.status == RecordStatus.main).length;
+  }
+
+  int countSubLast30(Goal goal) {
+    return _last30Records(goal).where((r) => r?.status == RecordStatus.sub).length;
+  }
+
+  int countAutoLast30(Goal goal) {
+    return _last30Records(goal).where((r) => r?.status == RecordStatus.auto).length;
+  }
+
+  int countMissLast30(Goal goal) {
+    return _last30Records(goal).where((r) => r?.status == RecordStatus.miss).length;
+  }
+
+  double mainPercentLast30(Goal goal) {
+    return countMainLast30(goal) / 30;
+  }
+
+  int streak(Goal goal) {
+    int count = 0;
+    DateTime d = businessToday();
+
+    while (true) {
+      final r = recordFor(goal.id, dateKey(d));
+      if (r == null) break;
+
+      if (r.status == RecordStatus.main || r.status == RecordStatus.sub) {
+        count++;
+        d = d.subtract(const Duration(days: 1));
+      } else {
+        break;
+      }
+    }
+
+    return count;
+  }
+
+  List<GoalRecord?> _last30Records(Goal goal) {
+    final result = <GoalRecord?>[];
+    DateTime d = businessToday();
+
+    for (int i = 0; i < 30; i++) {
+      result.add(recordFor(goal.id, dateKey(d)));
+      d = d.subtract(const Duration(days: 1));
+    }
+
+    return result;
   }
 }
 
-
-// ===== BLOCK 2.5: home wheel widget =====
-
-class _HomeWheel extends StatefulWidget {
-  final double idleSpeed;
-  final double maxSpeed;
-  final VoidCallback? onTap;
-
-  const _HomeWheel({
-    super.key,
-    required this.idleSpeed,
-    required this.maxSpeed,
-    this.onTap,
-  });
+class MokuhyoApp extends StatefulWidget {
+  const MokuhyoApp({super.key});
 
   @override
-  State<_HomeWheel> createState() => _HomeWheelState();
+  State<MokuhyoApp> createState() => _MokuhyoAppState();
 }
 
-class _HomeWheelState extends State<_HomeWheel>
-    with TickerProviderStateMixin, WidgetsBindingObserver {
-  late final AnimationController _ticker;
-  double _angle = 0.0;
-  double _speed;
-  ui.Image? _image;
-  Size? _imgSize;
-  bool _building = false;
-
-  _HomeWheelState() : _speed = 0.01;
+class _MokuhyoAppState extends State<MokuhyoApp> {
+  final AppState appState = AppState();
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-
-    _speed = widget.idleSpeed;
-
-    // 画面全体を rebuild しないよう、ホイールだけを動かす ticker
-    _ticker = AnimationController.unbounded(vsync: this)
-      ..addListener(() {
-        // ここで setState するのは このウィジェットだけ
-        _angle += _speed;
-        if (_angle > pi * 2) _angle -= pi * 2;
-        _speed *= 0.97;
-        if (_speed < widget.idleSpeed) _speed = widget.idleSpeed;
-        setState(() {}); // ← 再描画範囲は _HomeWheel 内だけ
-      })
-      ..repeat(
-        min: 0,
-        max: 1,
-        period: const Duration(milliseconds: 16),
-      ); // 約60fps
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _ticker.dispose();
-    _image?.dispose();
-    super.dispose();
-  }
-
-  // アプリが非表示の間は止める
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      _ticker.stop();
-    } else if (state == AppLifecycleState.resumed) {
-      _ticker.repeat(
-        min: 0,
-        max: 1,
-        period: const Duration(milliseconds: 22),
-      );
-    }
-  }
-
-  void _impulse() {
-    widget.onTap?.call();
-    _speed =
-        (_speed + 0.25).clamp(widget.idleSpeed, widget.maxSpeed);
-  }
-
-  Future<void> _ensureImage(Size size) async {
-    if (_building) return;
-    if (_image != null &&
-        _imgSize != null &&
-        (size.width - _imgSize!.width).abs() < 1 &&
-        (size.height - _imgSize!.height).abs() < 1) {
-      return;
-    }
-
-    _building = true;
-    try {
-      // 端末負荷が高い時は縮小係数を上げて描画負荷をさらに下げられる
-      final dpr = ui.window.devicePixelRatio;
-      final scale = (dpr >= 3.0) ? 0.75 : 1.0; // ★ 高密度端末で少し落とす
-
-      final w =
-      (size.width * dpr * scale).clamp(128, 2048).toInt();
-      final h =
-      (size.height * dpr * scale).clamp(128, 2048).toInt();
-
-      final rec = ui.PictureRecorder();
-      final c = Canvas(
-        rec,
-        Rect.fromLTWH(0, 0, w.toDouble(), h.toDouble()),
-      );
-
-      c.scale(dpr * scale, dpr * scale);
-
-      // ここは見た目そのまま：一度だけ描画（画像化）
-      final painter = _HomeWheelPainter(simplifyShadow: true); // ← 影を軽量化
-      painter.paint(c, size);
-      final pic = rec.endRecording();
-      final img = await pic.toImage(w, h);
-
-      _image?.dispose();
-
-      if (mounted) {
-        setState(() {
-          _image = img;
-          _imgSize = size;
-        });
-      } else {
-        img.dispose();
-      }
-    } finally {
-      _building = false;
-    }
+    appState.load();
   }
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: _impulse,
-      child: LayoutBuilder(
-        builder: (_, c) {
-          final sz = Size(c.maxWidth, c.maxHeight);
-          _ensureImage(sz);
-
-          if (_image == null) {
-            // 画像生成中はフォールバック（1フレーム）
-            return CustomPaint(
-              painter: _HomeWheelPainter(simplifyShadow: true),
-            );
-          }
-
-          return CustomPaint(
-            painter: _ImageWheelPainter(
-              image: _image!,
-              angle: _angle,
-            ),
-          );
-        },
-      ),
+    return AnimatedBuilder(
+      animation: appState,
+      builder: (context, _) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'できたシール',
+          theme: ThemeData(
+            useMaterial3: true,
+            colorScheme: ColorScheme.fromSeed(seedColor: kBlue),
+            scaffoldBackgroundColor: kBg,
+            fontFamily: 'sans',
+          ),
+          home: appState.loaded
+              ? RootPage(appState: appState)
+              : const Scaffold(
+                  body: Center(child: CircularProgressIndicator()),
+                ),
+        );
+      },
     );
   }
 }
 
-// ===== BLOCK 3A: home screen (タイトル画面) =====
-
 class RootPage extends StatefulWidget {
-  const RootPage({super.key});
+  const RootPage({super.key, required this.appState});
+
+  final AppState appState;
 
   @override
   State<RootPage> createState() => _RootPageState();
 }
 
-class SettingsPage extends StatefulWidget {
-  const SettingsPage({super.key});
-
-  @override
-  State<SettingsPage> createState() => _SettingsPageState();
-}
-
-class _SettingsPageState extends State<SettingsPage> {
-  AppSettings _settings = const AppSettings();
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final s = await Store.loadSettings();
-    if (!mounted) return;
-    setState(() {
-      _settings = s;
-      _loading = false;
-    });
-  }
-
-  Future<void> _update(AppSettings newSettings) async {
-    setState(() {
-      _settings = newSettings;
-    });
-    await Store.saveSettings(newSettings);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-
-    if (_loading) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('設定')),
-        body: const Center(child: CircularProgressIndicator()),
-      );
-    }
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('設定')),
-      body: SafeArea(
-        child: ListView(
-          children: [
-            const SizedBox(height: 4),
-
-            // プライベートモード
-            SwitchListTile.adaptive(
-              title: const Text('プライベートモード'),
-              subtitle: const Text(
-                'オンにしている間に回したルーレットは「前回のルーレット」に保存されません。',
-              ),
-              value: _settings.privateMode,
-              onChanged: (v) => _update(_settings.copyWith(privateMode: v)),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-            ),
-
-            const Divider(height: 1),
-
-            // 結果をすぐ表示（シンプルに一行）
-            SwitchListTile.adaptive(
-              title: const Text('結果をすぐ表示'),
-              value: _settings.quickResult,
-              onChanged: (v) => _update(_settings.copyWith(quickResult: v)),
-              contentPadding: const EdgeInsets.symmetric(horizontal: 16),
-            ),
-
-            const Divider(height: 12, thickness: 0.6),
-
-            // ルーレット時間ラベル
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-              child: Text(
-                'ルーレット時間',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: cs.primary,
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.4,
-                ),
-              ),
-            ),
-
-            // ルーレット時間ラジオ
-            RadioListTile<RouletteTimeMode>(
-              title: const Text('短い'),
-              value: RouletteTimeMode.short,
-              groupValue: _settings.timeMode,
-              onChanged: (v) {
-                if (v != null) _update(_settings.copyWith(timeMode: v));
-              },
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
-            ),
-            RadioListTile<RouletteTimeMode>(
-              title: const Text('普通'),
-              value: RouletteTimeMode.normal,
-              groupValue: _settings.timeMode,
-              onChanged: (v) {
-                if (v != null) _update(_settings.copyWith(timeMode: v));
-              },
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
-            ),
-            RadioListTile<RouletteTimeMode>(
-              title: const Text('長い'),
-              value: RouletteTimeMode.long,
-              groupValue: _settings.timeMode,
-              onChanged: (v) {
-                if (v != null) _update(_settings.copyWith(timeMode: v));
-              },
-              dense: true,
-              contentPadding: const EdgeInsets.symmetric(horizontal: 24),
-            ),
-
-            const SizedBox(height: 24), // 下が詰まりすぎないよう余白
-          ],
-        ),
-      ),
-
-      // 設定画面にもバナー
-      bottomNavigationBar: const BottomBanner(
-        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-      ),
-    );
-  }
-}
-
-// ▼ ランダム表示するサブ文言リスト（好きなだけ追加OK）
-const List<String> kSubMessages = [
-  "自由にルーレットをつくれるアプリ",
-  "迷った時はこれで決めよう",
-  "ぐるぐる回して楽しく決めよう",
-  "ぱっと作って、すぐ回せる",
-  "あなた好みのルーレットが作れる",
-  "今日の運勢も決めちゃおう？",
-  "飽きないカラフルルーレット",
-  "作るのも回すのもサクッと簡単",
-  "日常の些細な悩みに使えます",
-  "あらゆる選択をルーレットに",
-];
-
-
 class _RootPageState extends State<RootPage> {
-  RouletteDef? _last;
-
-  late final String _subtitle;
-
-  @override
-  void initState() {
-    super.initState();
-    // ▼ ランダムで1つ選ぶ
-    _subtitle = (List.of(kSubMessages)..shuffle()).first;
-    _loadLast();
-  }
-
-  Future<void> _loadLast() async {
-    final lastJson = await Store.loadLast();
-    if (!mounted) return;
-    setState(() {
-      _last =
-      lastJson == null ? null : RouletteDef.fromJson(lastJson);
-    });
-  }
-
-  void _goCreate() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const QuickInputPage()),
-    ).then((_) => _loadLast());   // ★ 追加
-  }
-
-  void _goLast() {
-    if (_last == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('前回のルーレットはまだありません'),
-        ),
-      );
-      return;
-    }
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => QuickInputPage(initial: _last!),
-      ),
-    );
-  }
-
-  void _goSaved() {
-    Navigator.push(
-      context,
-      MaterialPageRoute(builder: (_) => const SavedListPage()),
-    ).then((_) => _loadLast());   // ★ 追加
-  }
+  int index = 0;
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final pages = [
+      TodayPage(appState: widget.appState),
+      CalendarPage(appState: widget.appState),
+      GoalsPage(appState: widget.appState),
+    ];
 
     return Scaffold(
-      appBar: AppBar(
-        toolbarHeight: 120, // ← タイトルの上下余白UP
-        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        elevation: 0,
-        centerTitle: true,
-
-        title: Column(
-          children: [
-            const SizedBox(height: 10), // ← タイトルを少し下げる調整
-            const Text(
-              'ルーレットをつくろう',
-              style: TextStyle(
-                fontSize: 30,
-                fontWeight: FontWeight.w800,
-                letterSpacing: 0.2,
-                color: Colors.black87,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              _subtitle,
-              style: const TextStyle(
-                fontSize: 13,
-                color: Colors.black54,
-              ),
-            ),
-          ],
-        ),
-
-        actions: [
-          Padding(
-            padding: const EdgeInsets.only(right: 16, top: 12),
-            // ↑ アイコンの位置を下げて、タイトルとの高さバランスを揃える
-            child: IconButton(
-              icon: const Icon(Icons.settings_outlined),
-              iconSize: 28,
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const SettingsPage()),
-                );
-              },
-            ),
-          ),
+      body: SafeArea(child: pages[index]),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: index,
+        onDestinationSelected: (i) => setState(() => index = i),
+        backgroundColor: Colors.white.withOpacity(0.94),
+        indicatorColor: kBlueSoft,
+        destinations: const [
+          NavigationDestination(icon: Text('🏠', style: TextStyle(fontSize: 22)), label: '今日'),
+          NavigationDestination(icon: Text('🗓', style: TextStyle(fontSize: 22)), label: 'カレンダー'),
+          NavigationDestination(icon: Text('🎯', style: TextStyle(fontSize: 22)), label: '目標'),
         ],
       ),
+    );
+  }
+}
 
+class TodayPage extends StatelessWidget {
+  const TodayPage({super.key, required this.appState});
 
+  final AppState appState;
 
-      // ← ここから body
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
-          child: Column(
-            children: [
-              const SizedBox(height: 8),
-              Expanded(
-                child: Center(
-                  child: AspectRatio(
-                    aspectRatio: 1,
-                    child: _HomeWheel(
-                      idleSpeed: 0.01,
-                      maxSpeed: 0.70,
-                      onTap: () {},
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                height: 80,
-                child: ElevatedButton(
-                  onPressed: _goCreate,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: cs.primary,
-                    foregroundColor: cs.onPrimary,
-                    elevation: 10,
-                    shadowColor:
-                    Colors.black.withOpacity(0.30),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(24),
-                    ),
-                    textStyle: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  child: const Text('ルーレットを作る'),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Row(
+  @override
+  Widget build(BuildContext context) {
+    final todayKey = businessTodayKey();
+    final goals = appState.activeGoals;
+
+    final unrecorded = goals.where((g) => appState.recordFor(g.id, todayKey) == null).toList();
+    final recorded = goals.where((g) => appState.recordFor(g.id, todayKey) != null).toList();
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 24),
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Expanded(
-                    child: Material(
-                      elevation: 2,
-                      borderRadius: BorderRadius.circular(14),
-                      color: Colors.transparent,
-                      child: OutlinedButton(
-                        onPressed: _goLast,
-                        style: OutlinedButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          padding:
-                          const EdgeInsets.symmetric(
-                            vertical: 14,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius:
-                            BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: const Text('前回のルーレット'),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Material(
-                      elevation: 2,
-                      borderRadius: BorderRadius.circular(14),
-                      color: Colors.transparent,
-                      child: OutlinedButton(
-                        onPressed: _goSaved,
-                        style: OutlinedButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          padding:
-                          const EdgeInsets.symmetric(
-                            vertical: 14,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius:
-                            BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: const Text('保存済みルーレット'),
-                      ),
-                    ),
+                  Text('午前3:00切り替え', style: TextStyle(color: kMuted, fontWeight: FontWeight.w800)),
+                  SizedBox(height: 4),
+                  Text(
+                    '今日の記録',
+                    style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: -1.6),
                   ),
                 ],
               ),
+            ),
+            RoundIconButton(
+              icon: '+',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => GoalEditPage(appState: appState)),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 20),
+        SummaryCard(
+          title: 'まだ記録していない目標',
+          big: '${unrecorded.length}',
+          suffix: '個',
+          caption: '下のカードから、本目標・サブ目標・未達を選ぶ',
+        ),
+        const SizedBox(height: 22),
+        SectionTitle(
+          title: '未達成・未記録',
+          right: '今日まだ押していない目標',
+        ),
+        if (goals.isEmpty)
+          EmptyPanel(
+            title: 'まだ目標がありません',
+            text: 'まずは1つ目標を作ろう。\n例：筋トレ、本目標30分、サブ目標1分。',
+            buttonText: '＋ 目標を作る',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => GoalEditPage(appState: appState)),
+            ),
+          )
+        else if (unrecorded.isEmpty)
+          const EmptyPanel(
+            title: '今日の未記録はありません',
+            text: '全部記録済み。いい感じ。',
+          )
+        else
+          ...unrecorded.map(
+            (g) => TodayGoalCard(
+              goal: g,
+              appState: appState,
+              dateKey: todayKey,
+            ),
+          ),
+        const SizedBox(height: 20),
+        SectionTitle(
+          title: '記録済み',
+          right: '押し直しで変更可能',
+        ),
+        if (recorded.isEmpty)
+          const EmptyPanel(
+            title: 'まだ記録済みはありません',
+            text: '本目標・サブ・未達を押すとここへ移動します。',
+          )
+        else
+          ...recorded.map(
+            (g) => RecordedGoalCard(
+              goal: g,
+              record: appState.recordFor(g.id, todayKey)!,
+              appState: appState,
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class TodayGoalCard extends StatelessWidget {
+  const TodayGoalCard({
+    super.key,
+    required this.goal,
+    required this.appState,
+    required this.dateKey,
+  });
+
+  final Goal goal;
+  final AppState appState;
+  final String dateKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return BaseGoalCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GoalCardHeader(
+            name: goal.name,
+            badge: '未記録',
+          ),
+          const SizedBox(height: 14),
+          TargetBox(label: '本目標', text: goal.mainTarget, color: kYellow),
+          const SizedBox(height: 8),
+          TargetBox(label: 'サブ目標', text: goal.subTarget, color: kGreen),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: StampButton(
+                  emoji: '🌟',
+                  label: '本目標',
+                  color: kYellow,
+                  onTap: () => openMemoSheet(
+                    context: context,
+                    title: '本目標達成！',
+                    emoji: '🌟',
+                    onSave: (memo) => appState.upsertRecord(
+                      goalId: goal.id,
+                      dayKey: dateKey,
+                      status: RecordStatus.main,
+                      memo: memo,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: StampButton(
+                  emoji: '✅',
+                  label: 'サブ',
+                  color: kGreen,
+                  onTap: () => openMemoSheet(
+                    context: context,
+                    title: 'サブ目標達成！',
+                    emoji: '✅',
+                    onSave: (memo) => appState.upsertRecord(
+                      goalId: goal.id,
+                      dayKey: dateKey,
+                      status: RecordStatus.sub,
+                      memo: memo,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: StampButton(
+                  emoji: '☁️',
+                  label: '未達',
+                  color: kGray,
+                  onTap: () => openMemoSheet(
+                    context: context,
+                    title: '未達成として記録',
+                    emoji: '☁️',
+                    onSave: (memo) => appState.upsertRecord(
+                      goalId: goal.id,
+                      dayKey: dateKey,
+                      status: RecordStatus.miss,
+                      memo: memo,
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
-        ),
-      ),
-      // ← ここが Scaffold の bottomNavigationBar
-      bottomNavigationBar: const BottomBanner(
-        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+        ],
       ),
     );
   }
 }
 
-/// タイトル画面用のルーレット描画（セグメント＋中心の白丸）
-class _HomeWheelPainter extends CustomPainter {
-  final bool simplifyShadow;
+class RecordedGoalCard extends StatelessWidget {
+  const RecordedGoalCard({
+    super.key,
+    required this.goal,
+    required this.record,
+    required this.appState,
+  });
 
-  _HomeWheelPainter({this.simplifyShadow = false});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center =
-    Offset(size.width / 2, size.height / 2);
-    final r = size.shortestSide * 0.45;
-    final rect = Rect.fromCircle(
-      center: center,
-      radius: r,
-    );
-
-    // 落ち影（軽量化オプション）
-    if (simplifyShadow) {
-      final sp = Paint()..color = Colors.black12;
-      canvas.drawCircle(
-        center + const Offset(0, 6),
-        r * 0.94,
-        sp,
-      );
-    } else {
-      final sp = Paint()
-        ..color = Colors.black.withOpacity(0.18)
-        ..maskFilter = const ui.MaskFilter.blur(
-          ui.BlurStyle.normal,
-          18,
-        );
-      canvas.drawCircle(
-        center + const Offset(0, 8),
-        r * 0.94,
-        sp,
-      );
-    }
-
-    // セグメント色
-    final colors = <Color>[
-      Colors.redAccent,
-      Colors.orangeAccent,
-      Colors.yellow.shade600,
-      Colors.lightGreenAccent.shade400,
-      Colors.lightBlueAccent,
-      Colors.purpleAccent,
-    ];
-
-    double start = -pi / 2;
-    final sweep = 2 * pi / colors.length;
-    final segPaint = Paint()..style = PaintingStyle.fill;
-
-    for (final c in colors) {
-      segPaint.shader = RadialGradient(
-        colors: [
-          _shade(c, lightnessDelta: -0.08),
-          c,
-          _shade(c, lightnessDelta: 0.06),
-        ],
-        stops: const [0.0, 0.7, 1.0],
-        center: const Alignment(0.0, -0.2),
-        radius: 1.0,
-      ).createShader(rect);
-
-      canvas.drawArc(rect, start, sweep, true, segPaint);
-      start += sweep;
-    }
-
-    // 外周リム
-    final rimPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3
-      ..shader = SweepGradient(
-        startAngle: -pi / 2,
-        endAngle: 3 * pi / 2,
-        colors: [
-          Colors.white.withOpacity(0.7),
-          Colors.white.withOpacity(0.0),
-          Colors.black.withOpacity(0.12),
-          Colors.white.withOpacity(0.4),
-        ],
-      ).createShader(rect);
-    canvas.drawCircle(center, r - 1, rimPaint);
-
-    // 中心の白丸
-    final hubR = r * 0.45;
-    final hubRect = Rect.fromCircle(
-      center: center,
-      radius: hubR,
-    );
-    final hubPaint = Paint()
-      ..shader = RadialGradient(
-        colors: [
-          Colors.white,
-          Colors.grey.shade200,
-        ],
-        center: const Alignment(-0.15, -0.15),
-        radius: 1.0,
-      ).createShader(hubRect);
-    canvas.drawCircle(center, hubR, hubPaint);
-
-    final hubStroke = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..color = Colors.black.withOpacity(0.10);
-    canvas.drawCircle(center, hubR, hubStroke);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) =>
-      false;
-}
-
-// ===== BLOCK 3B: quick input page =====
-
-class QuickInputPage extends StatefulWidget {
-  final RouletteDef? initial;
-
-  const QuickInputPage({super.key, this.initial});
-
-  @override
-  State<QuickInputPage> createState() =>
-      _QuickInputPageState();
-}
-
-class _QuickInputPageState extends State<QuickInputPage> {
-  // ★ 追加：最大項目数と乱数
-  static const int _maxItems = 30;
-  final Random _rand = Random();
-
-  final List<TextEditingController> _nameCtls = [];
-  final List<TextEditingController> _weightCtls = [];
-  final List<int> _colors = [];
-
-
-  @override
-  void initState() {
-    super.initState();
-
-    if (widget.initial != null) {
-      for (final it in widget.initial!.items) {
-        _nameCtls.add(
-          TextEditingController(text: it.name),
-        );
-        _weightCtls.add(
-          TextEditingController(text: it.weight.toString()),
-        );
-        _colors.add(it.color);
-      }
-      if (_nameCtls.length < 2) _ensureMinRows();
-    } else {
-      _ensureMinRows();
-    }
-  }
-
-  void _ensureMinRows() {
-    while (_nameCtls.length < 2) {
-      _addRow();
-    }
-  }
-
-  void _addRow({
-    String name = '',
-    int weight = 1,
-    int? color,
-  }) {
-    // ★ ここで最大数チェック
-    if (_nameCtls.length >= _maxItems) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('項目は30個まで追加できます'),
-        ),
-      );
-      return;
-    }
-
-    setState(() {
-      _nameCtls.add(
-        TextEditingController(text: name),
-      );
-      _weightCtls.add(
-        TextEditingController(text: weight.toString()),
-      );
-
-      // ★ 色が指定されている（保存済み読み込みなど）ときはそのまま使う
-      if (color != null) {
-        _colors.add(color);
-        return;
-      }
-
-      // ★ 新しく作るとき用：明るめパレットからランダムに選ぶ
-      final palette = <Color>[
-        const Color(0xFFFF6B6B), // ちょい暗めレッド
-        const Color(0xFFFFA94D), // オレンジ
-        const Color(0xFFFFD93D), // 濃いめイエロー（ギリ白文字OK）
-        const Color(0xFF6BCB77), // グリーン
-        const Color(0xFF4D96FF), // ブルー（薄い水色より濃く）
-        const Color(0xFF9D4EDD), // パープル
-        const Color(0xFFE056FD), // ピンク寄りパープル
-        const Color(0xFFFB6F92), // ピンク
-        const Color(0xFFFF7B54), // 赤寄りオレンジ
-        const Color(0xFF2D9CDB), // さらに濃いブルー
-      ];
-
-
-
-
-
-      // すでに使っている色はできるだけ避ける
-      final used = _colors.toSet();
-      final available = palette
-          .where((c) => !used.contains(c.value))
-          .toList();
-
-      final picked = (available.isNotEmpty
-          ? available[_rand.nextInt(available.length)]
-          : palette[_rand.nextInt(palette.length)]);
-
-      _colors.add(picked.value);
-    });
-  }
-
-
-  void _removeRow(int index) {
-    if (_nameCtls.length <= 2) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('項目は最低2つ必要です'),
-        ),
-      );
-      return;
-    }
-
-    setState(() {
-      _nameCtls[index].dispose();
-      _weightCtls[index].dispose();
-      _nameCtls.removeAt(index);
-      _weightCtls.removeAt(index);
-      _colors.removeAt(index);
-    });
-  }
-
-  @override
-  void dispose() {
-    for (final c in _nameCtls) {
-      c.dispose();
-    }
-    for (final c in _weightCtls) {
-      c.dispose();
-    }
-    super.dispose();
-  }
-
-  int _parseWeight(TextEditingController c) {
-    final v = int.tryParse(c.text.trim()) ?? 1;
-    return v.clamp(1, 100);
-  }
-
-  Future<void> _onSpin() async {
-    final List<RouletteItem> items = [];
-
-    for (int i = 0; i < _nameCtls.length; i++) {
-      final name = _nameCtls[i].text.trim();
-      if (name.isEmpty) continue;
-
-      final w = _parseWeight(_weightCtls[i]);
-      final color = _colors[i];
-
-      items.add(
-        RouletteItem(
-          name: name,
-          weight: w,
-          color: color,
-        ),
-      );
-    }
-
-    if (items.length < 2) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('項目を2つ以上入力してください'),
-        ),
-      );
-      return;
-    }
-
-    final now = DateTime.now().toIso8601String();
-
-    final def = RouletteDef(
-      id: UniqueKey().toString(),
-      title: '未保存ルーレット',
-      items: items,
-      createdAt: now,
-      updatedAt: now,
-      lastUsedAt: null,
-      isPinned: false,
-    );
-
-    // 設定読み込み（クイック結果用）
-    final settings = await Store.loadSettings();
-
-    if (!mounted) return;
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => SpinPage(
-          def: def,
-          quickResult: settings.quickResult,
-        ),
-      ),
-    );
-  }
-
-  InputDecoration _fieldDec(
-      BuildContext context,
-      String label,
-      ) {
-    final cs = Theme.of(context).colorScheme;
-
-    return InputDecoration(
-      labelText: label,
-      isDense: true,
-      contentPadding: const EdgeInsets.symmetric(
-        horizontal: 12,
-        vertical: 12,
-      ),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(
-          width: 1.4,
-          color: Color(0xFFDBDEE3),
-        ),
-      ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(
-          width: 1.4,
-          color: Color(0xFFDBDEE3),
-        ),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: BorderSide(
-          width: 2,
-          color: cs.primary,
-        ),
-      ),
-    );
-  }
+  final Goal goal;
+  final GoalRecord record;
+  final AppState appState;
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final emoji = statusEmoji(record.status, autoStamp: record.autoStamp);
 
-    return Scaffold(
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        centerTitle: true,
-        title: const Text(
-          'ルーレットを作る',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w800,
-            color: Colors.black87,
-            letterSpacing: 0.3,
-          ),
-        ),
-      ),
-      body: SafeArea(
-        child: Padding(
-          padding:
-          const EdgeInsets.fromLTRB(16, 12, 16, 0),
-          child: ListView.builder(
-            padding: const EdgeInsets.only(bottom: 140),
-            itemCount: _nameCtls.length,
-            itemBuilder: (context, index) {
-              final canDelete = _nameCtls.length > 2;
-              return Padding(
-                padding: const EdgeInsets.symmetric(
-                  vertical: 6,
-                ),
-                child: Row(
-                  crossAxisAlignment:
-                  CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      flex: 3,
-                      child: TextField(
-                        controller: _nameCtls[index],
-                        maxLength: 30,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          color: Colors.black87,
-                        ),
-                        decoration: _fieldDec(
-                          context,
-                          '項目名',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    SizedBox(
-                      width: 88,
-                      child: TextField(
-                        controller: _weightCtls[index],
-                        textAlign: TextAlign.center,
-                        keyboardType:
-                        TextInputType.number,
-                        inputFormatters: [
-                          FilteringTextInputFormatter
-                              .digitsOnly,
-                        ],
-                        style: const TextStyle(
-                          fontSize: 18,
-                          color: Colors.black87,
-                        ),
-                        decoration: _fieldDec(
-                          context,
-                          '比率',
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 4),
-                    IconButton(
-                      tooltip: '削除',
-                      icon: const Icon(
-                        Icons.delete_outline,
-                      ),
-                      onPressed: canDelete
-                          ? () => _removeRow(index)
-                          : null,
-                      color: canDelete
-                          ? Colors.red.shade400
-                          : Colors.black26,
-                    ),
-                  ],
-                ),
-              );
-            },
-          ),
-        ),
-      ),
-      bottomNavigationBar: SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // 🔻 広告（ここで左右16のパディングを指定）
-            const BottomBanner(
-              padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-            ),
-
-            const SizedBox(height: 10),
-
-            // 🔻 「項目を追加」ボタン（広告とは別に余白をつける）
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-              child: SizedBox(
-                height: 52,
-                width: double.infinity,
-                child: FilledButton.tonalIcon(
-                  onPressed: _addRow,
-                  icon: const Icon(Icons.add),
-                  label: const Text('項目を追加'),
-                  style: FilledButton.styleFrom(
-                    textStyle: const TextStyle(
-                      fontWeight: FontWeight.w700,
-                    ),
-                    backgroundColor: cs.secondaryContainer,
-                    foregroundColor: cs.onSecondaryContainer,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-            const SizedBox(height: 10),
-
-            // 🔻 「ルーレットを回す」ボタン
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              child: SizedBox(
-                height: 72,
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _onSpin,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: cs.primary,
-                    foregroundColor: cs.onPrimary,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    textStyle: const TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  child: const Text('ルーレットを回す'),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-
-    );
-  }
-}
-
-// ===== BLOCK 3C: saved list page =====
-
-class SavedListPage extends StatefulWidget {
-  const SavedListPage({super.key});
-
-  @override
-  State<SavedListPage> createState() =>
-      _SavedListPageState();
-}
-
-class _SavedListPageState extends State<SavedListPage> {
-  List<RouletteDef> _saved = [];
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    final seeded = await Store.hasSeededDefault(); // ★ 追加
-    var list = await Store.loadSaved();
-
-    // ★ まだ seed してなくて、保存が0件のときだけ運勢ルーレットを入れる
-    if (!seeded && list.isEmpty) {
-      final def = Store.defaultOmikuji();  // ← ここを修正
-      list = [def];
-      await Store.saveSaved(list);
-      await Store.setSeededDefault();      // 二度と自動追加しない
-    }
-
-    list.sort((a, b) {
-      final pin = (b.isPinned ? 1 : 0) - (a.isPinned ? 1 : 0);
-      if (pin != 0) return pin;
-      return (b.lastUsedAt ?? '').compareTo(a.lastUsedAt ?? '');
-    });
-
-    setState(() => _saved = list);
-  }
-
-
-
-  Future<void> _saveAll(List<RouletteDef> list) async {
-    await Store.saveSaved(list);
-    await _load();
-  }
-
-  Future<void> _togglePin(RouletteDef d) async {
-    final list = await Store.loadSaved();
-    final i = list.indexWhere((e) => e.id == d.id);
-    if (i >= 0) {
-      list[i] = RouletteDef(
-        id: d.id,
-        title: d.title,
-        items: d.items,
-        createdAt: d.createdAt,
-        updatedAt:
-        DateTime.now().toIso8601String(),
-        lastUsedAt: d.lastUsedAt,
-        isPinned: !d.isPinned,
-      );
-      await _saveAll(list);
-    }
-  }
-
-  Future<void> _rename(RouletteDef d) async {
-    final titleCtl =
-    TextEditingController(text: d.title);
-
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('名前を変更'),
-        content: TextField(
-          controller: titleCtl,
-          maxLength: 30,
-          decoration: const InputDecoration(
-            labelText: 'タイトル',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                Navigator.pop(context, false),
-            child: const Text('キャンセル'),
-          ),
-          FilledButton(
-            onPressed: () =>
-                Navigator.pop(context, true),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-
-    if (ok != true) return;
-
-    var newTitle = titleCtl.text.trim().isEmpty
-        ? d.title
-        : titleCtl.text.trim();
-
-    final list = await Store.loadSaved();
-
-    if (list.any(
-          (e) => e.id != d.id && e.title == newTitle,
-    )) {
-      int n = 2;
-      while (list.any(
-            (e) => e.id != d.id && e.title == '$newTitle$n',
-      )) {
-        n++;
-      }
-      newTitle = '$newTitle$n';
-    }
-
-    final i = list.indexWhere((e) => e.id == d.id);
-    if (i >= 0) {
-      list[i] = RouletteDef(
-        id: d.id,
-        title: newTitle,
-        items: d.items,
-        createdAt: d.createdAt,
-        updatedAt:
-        DateTime.now().toIso8601String(),
-        lastUsedAt: d.lastUsedAt,
-        isPinned: d.isPinned,
-      );
-      await _saveAll(list);
-    }
-  }
-
-  Future<void> _confirmDelete(RouletteDef d) async {
-    final cs = Theme.of(context).colorScheme;
-
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('削除しますか？'),
-        content: Text(
-          '「${d.title}」を削除します。元に戻せません。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                Navigator.pop(context, false),
-            child: const Text('キャンセル'),
-          ),
-          FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: Colors.red.shade600,
-              foregroundColor: Colors.white,
-            ),
-            onPressed: () =>
-                Navigator.pop(context, true),
-            child: const Text('削除'),
-          ),
-        ],
-      ),
-    );
-
-    if (ok != true) return;
-
-    final list = await Store.loadSaved();
-    list.removeWhere((e) => e.id == d.id);
-    await _saveAll(list);
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Text('削除しました'),
-          behavior: SnackBarBehavior.floating,
-          margin: const EdgeInsets.fromLTRB(
-            16,
-            0,
-            16,
-            80,
-          ),
-          backgroundColor:
-          cs.surfaceTint.withOpacity(0.9),
-        ),
-      );
-    }
-  }
-
-  Widget _emptyState(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-
-    return Center(
+    return BaseGoalCard(
+      borderColor: const Color(0xFFC7F0D8),
       child: Column(
-        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(
-            Icons.inbox_outlined,
-            size: 56,
-            color: Colors.black26,
+          GoalCardHeader(
+            name: goal.name,
+            badge: '$emoji ${statusLabel(record.status)}',
           ),
           const SizedBox(height: 10),
-          const Text(
-            'まだ保存されたルーレットはありません',
-            style: TextStyle(color: Colors.black54),
-          ),
-          const SizedBox(height: 16),
-          FilledButton.icon(
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) =>
-                  const QuickInputPage(),
-                ),
-              );
-            },
-            icon: const Icon(Icons.add),
-            label: const Text('新しく作る'),
-            style: FilledButton.styleFrom(
-              backgroundColor: cs.primary,
-              foregroundColor: cs.onPrimary,
-              shape: RoundedRectangleBorder(
-                borderRadius:
-                BorderRadius.circular(14),
-              ),
+          if (record.memo.isNotEmpty)
+            Text(
+              record.memo,
+              style: const TextStyle(fontWeight: FontWeight.w800, color: kMuted),
             ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: SecondaryButton(
+                  label: '変更する',
+                  onTap: () => openRecordEditSheet(
+                    context: context,
+                    appState: appState,
+                    goal: goal,
+                    dayKey: record.dateKey,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
     );
   }
+}
+
+class CalendarPage extends StatefulWidget {
+  const CalendarPage({super.key, required this.appState});
+
+  final AppState appState;
+
+  @override
+  State<CalendarPage> createState() => _CalendarPageState();
+}
+
+class _CalendarPageState extends State<CalendarPage> {
+  String? selectedGoalId;
+  DateTime visibleMonth = DateTime(businessToday().year, businessToday().month);
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
+    final goals = widget.appState.goals;
+    final activeOrFirst = goals.isEmpty ? null : goals.firstWhere(
+      (g) => g.id == selectedGoalId,
+      orElse: () => goals.first,
+    );
 
-    return Scaffold(
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-        titleSpacing: 8,
-        title: Row(
-          children: [
-            Icon(
-              Icons.save_alt_rounded,
-              color: Theme.of(context).colorScheme.primary,
-              size: 26,
-            ),
-            const SizedBox(width: 8),
-            const Text(
-              '保存済みルーレット',
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.w800,
-                color: Colors.black87,
-                letterSpacing: 0.3,
-              ),
-            ),
-          ],
+    selectedGoalId ??= activeOrFirst?.id;
+
+    final selectedGoal = activeOrFirst;
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 24),
+      children: [
+        const Text('スタンプ帳', style: TextStyle(color: kMuted, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 4),
+        const Text(
+          'カレンダー',
+          style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: -1.6),
         ),
-      ),
-
-      // ← ここがさっき貼ってくれた body
-      body: _saved.isEmpty
-          ? _emptyState(context)
-          : ListView.builder(
-        padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-        itemCount: _saved.length,
-        itemBuilder: (context, i) {
-          final d = _saved[i];
-          final preview = d.items
-              .take(3)
-              .map((e) => e.name)
-              .join('、') +
-              (d.items.length > 3 ? '…' : '');
-
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Material(
-              color: Colors.white,
-              elevation: 2,
-              borderRadius: BorderRadius.circular(16),
-              clipBehavior: Clip.antiAlias,
-              child: InkWell(
-                onTap: () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => QuickInputPage(initial: d),
+        const SizedBox(height: 16),
+        if (goals.isEmpty)
+          const EmptyPanel(
+            title: '表示する目標がありません',
+            text: '目標を作ると、ここにカレンダーが表示されます。',
+          )
+        else ...[
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: goals.map((g) {
+                final active = g.id == selectedGoalId;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: ChoiceChip(
+                    label: Text(g.name),
+                    selected: active,
+                    onSelected: (_) => setState(() => selectedGoalId = g.id),
+                    selectedColor: kText,
+                    labelStyle: TextStyle(
+                      color: active ? Colors.white : kMuted,
+                      fontWeight: FontWeight.w900,
                     ),
-                  ).then((_) => _load());
-                },
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    backgroundColor: Colors.white,
+                    side: BorderSide.none,
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
+          const SizedBox(height: 16),
+          if (selectedGoal != null) CalendarSummary(appState: widget.appState, goal: selectedGoal),
+          const SizedBox(height: 16),
+          CalendarCard(
+            appState: widget.appState,
+            goal: selectedGoal!,
+            visibleMonth: visibleMonth,
+            onPrev: () => setState(() {
+              visibleMonth = DateTime(visibleMonth.year, visibleMonth.month - 1);
+            }),
+            onNext: () => setState(() {
+              visibleMonth = DateTime(visibleMonth.year, visibleMonth.month + 1);
+            }),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class CalendarSummary extends StatelessWidget {
+  const CalendarSummary({
+    super.key,
+    required this.appState,
+    required this.goal,
+  });
+
+  final AppState appState;
+  final Goal goal;
+
+  @override
+  Widget build(BuildContext context) {
+    return BaseCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(goal.name, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 4),
+          Text(
+            '本目標：${goal.mainTarget} / サブ：${goal.subTarget}',
+            style: const TextStyle(color: kMuted, fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(child: StatTile(emoji: '🌟', number: '${appState.countMainLast30(goal)}', label: '本目標')),
+              const SizedBox(width: 8),
+              Expanded(child: StatTile(emoji: '✅', number: '${appState.countSubLast30(goal)}', label: 'サブ')),
+              const SizedBox(width: 8),
+              Expanded(child: StatTile(emoji: '🐌', number: '${appState.countAutoLast30(goal)}', label: '未記録')),
+              const SizedBox(width: 8),
+              Expanded(child: StatTile(emoji: '☁️', number: '${appState.countMissLast30(goal)}', label: '未達')),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CalendarCard extends StatelessWidget {
+  const CalendarCard({
+    super.key,
+    required this.appState,
+    required this.goal,
+    required this.visibleMonth,
+    required this.onPrev,
+    required this.onNext,
+  });
+
+  final AppState appState;
+  final Goal goal;
+  final DateTime visibleMonth;
+  final VoidCallback onPrev;
+  final VoidCallback onNext;
+
+  @override
+  Widget build(BuildContext context) {
+    final first = DateTime(visibleMonth.year, visibleMonth.month, 1);
+    final daysInMonth = DateTime(visibleMonth.year, visibleMonth.month + 1, 0).day;
+    final startOffset = first.weekday % 7;
+    final totalCells = startOffset + daysInMonth;
+    final rows = (totalCells / 7).ceil();
+    final cellCount = rows * 7;
+
+    return BaseCard(
+      child: Column(
+        children: [
+          Row(
+            children: [
+              IconButton(onPressed: onPrev, icon: const Icon(Icons.chevron_left)),
+              Expanded(
+                child: Center(
+                  child: Text(
+                    monthTitle(visibleMonth),
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+                  ),
+                ),
+              ),
+              IconButton(onPressed: onNext, icon: const Icon(Icons.chevron_right)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          const Row(
+            children: [
+              Expanded(child: Dow('日')),
+              Expanded(child: Dow('月')),
+              Expanded(child: Dow('火')),
+              Expanded(child: Dow('水')),
+              Expanded(child: Dow('木')),
+              Expanded(child: Dow('金')),
+              Expanded(child: Dow('土')),
+            ],
+          ),
+          const SizedBox(height: 8),
+          GridView.builder(
+            itemCount: cellCount,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: 7,
+              crossAxisSpacing: 7,
+              mainAxisSpacing: 7,
+            ),
+            itemBuilder: (context, index) {
+              final dayNumber = index - startOffset + 1;
+
+              if (dayNumber < 1 || dayNumber > daysInMonth) {
+                return const SizedBox();
+              }
+
+              final d = DateTime(visibleMonth.year, visibleMonth.month, dayNumber);
+              final key = dateKey(d);
+              final record = appState.recordFor(goal.id, key);
+              final emoji = record == null
+                  ? '・'
+                  : statusEmoji(record.status, autoStamp: record.autoStamp);
+
+              final isToday = key == businessTodayKey();
+
+              return InkWell(
+                borderRadius: BorderRadius.circular(15),
+                onTap: () => openRecordEditSheet(
+                  context: context,
+                  appState: appState,
+                  goal: goal,
+                  dayKey: key,
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF8FAFC),
+                    borderRadius: BorderRadius.circular(15),
+                    border: isToday ? Border.all(color: kBlue, width: 3) : null,
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              d.title,
-                              style: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.black87,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              preview,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: Colors.black54,
-                              ),
-                            ),
-                          ],
+                      Text(emoji, style: const TextStyle(fontSize: 20)),
+                      Text(
+                        '$dayNumber',
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: kMuted,
+                          fontWeight: FontWeight.w900,
                         ),
-                      ),
-                      const SizedBox(width: 6),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          IconButton(
-                            tooltip: '名前変更',
-                            icon: Icon(
-                              Icons.edit_outlined,
-                              color: cs.primary.withOpacity(0.95),
-                            ),
-                            onPressed: () => _rename(d),
-                          ),
-                          IconButton(
-                            tooltip: d.isPinned ? 'お気に入り解除' : 'お気に入り',
-                            icon: Icon(
-                              d.isPinned ? Icons.star : Icons.star_border,
-                              color: d.isPinned ? cs.primary : Colors.black45,
-                            ),
-                            onPressed: () => _togglePin(d),
-                          ),
-                          IconButton(
-                            tooltip: '削除',
-                            icon: Icon(
-                              Icons.delete_outline,
-                              color: Colors.red.shade700,
-                            ),
-                            onPressed: () => _confirmDelete(d),
-                          ),
-                        ],
                       ),
                     ],
                   ),
                 ),
-              ),
-            ),
-          );
-        },
-      ),
-
-      // 🔻 ここを追加：保存済み画面用のバナー
-      bottomNavigationBar: const BottomBanner(
-        padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-      ),
-    );
-  }
-
-}
-
-// ===== BLOCK 5: spin page =====
-
-class SpinPage extends StatefulWidget {
-  final RouletteDef def;
-  final bool quickResult; // ★ 追加
-
-  const SpinPage({
-    super.key,
-    required this.def,
-    this.quickResult = false,
-  });
-
-  @override
-  State<SpinPage> createState() => _SpinPageState();
-}
-
-class _SpinPageState extends State<SpinPage>
-    with TickerProviderStateMixin {
-  late AnimationController wheelCtrl;
-  late Animation<double> wheelAnim;
-
-  // ★ ここ追加：設定で変わる値
-  late Duration _spinDuration;
-  late int _spinsCount;
-
-  // TAP! アニメ
-  late AnimationController _tapCtrl;
-  late Animation<double> _tapScale;
-
-  // 結果オーバーレイ
-  late AnimationController _resultCtrl;
-  late Animation<double> _cardScale;
-  late Animation<double> _cardOpacity;
-  late Animation<Offset> _sheetOffset;
-
-  final rand = Random();
-
-  bool _spinning = false;
-  double _angle = 0.0;
-  String? _resultName;
-
-  ui.Image? _wheelImage;
-  Size? _wheelImageSize;
-  bool _buildingImage = false;
-
-  @override
-  void initState() {
-    super.initState();
-
-    // デフォ値
-    _spinDuration =
-    const Duration(milliseconds: 5000);
-    _spinsCount = 15;
-
-    wheelCtrl = AnimationController(
-      vsync: this,
-      duration: _spinDuration,
-    );
-
-    // 設定から時間モードを反映
-    _loadSpinSettings();
-
-    _tapCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    );
-    _tapScale = Tween<double>(
-      begin: 0.94,
-      end: 1.08,
-    ).animate(
-      CurvedAnimation(
-        parent: _tapCtrl,
-        curve: Curves.easeInOutQuad,
-      ),
-    );
-    _tapCtrl.repeat(reverse: true);
-
-    _resultCtrl = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 260),
-    );
-    _cardScale = Tween<double>(
-      begin: 0.95,
-      end: 1.0,
-    ).animate(
-      CurvedAnimation(
-        parent: _resultCtrl,
-        curve: Curves.easeOutBack,
-      ),
-    );
-    _cardOpacity = CurvedAnimation(
-      parent: _resultCtrl,
-      curve: Curves.easeOutCubic,
-    );
-    _sheetOffset = Tween<Offset>(
-      begin: const Offset(0, 0.25),
-      end: Offset.zero,
-    ).animate(
-      CurvedAnimation(
-        parent: _resultCtrl,
-        curve: Curves.easeOutCubic,
-      ),
-    );
-
-    // ★ 結果をすぐ表示モードなら、画面表示後すぐ結果決定
-    if (widget.quickResult) {
-      WidgetsBinding.instance.addPostFrameCallback(
-            (_) {
-          _spin();
-        },
-      );
-    }
-  }
-
-  Future<void> _loadSpinSettings() async {
-    final settings = await Store.loadSettings();
-    if (!mounted) return;
-
-    switch (settings.timeMode) {
-      case RouletteTimeMode.short:
-        _spinDuration =
-        const Duration(milliseconds: 2500);
-        _spinsCount = 11;
-        break;
-      case RouletteTimeMode.normal:
-        _spinDuration =
-        const Duration(milliseconds: 5000);
-        _spinsCount = 15;
-        break;
-      case RouletteTimeMode.long:
-        _spinDuration =
-        const Duration(milliseconds: 8000);
-        _spinsCount = 20;
-        break;
-    }
-    wheelCtrl.duration = _spinDuration;
-  }
-
-  @override
-  void didUpdateWidget(covariant SpinPage oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.def.items != widget.def.items) {
-      _wheelImage?.dispose();
-      _wheelImage = null;
-      _wheelImageSize = null;
-    }
-  }
-
-  @override
-  void dispose() {
-    wheelCtrl.dispose();
-    _tapCtrl.dispose();
-    _resultCtrl.dispose();
-    _wheelImage?.dispose();
-    super.dispose();
-  }
-
-  Future<void> _spin() async {
-    if (_spinning || _resultName != null) return;
-
-    final items = widget.def.items;
-    if (items.length < 2) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text("候補は2件以上必要です"),
-        ),
-      );
-      return;
-    }
-
-    setState(() {
-      _spinning = true;
-      _resultName = null;
-    });
-
-    // 重み付きで当たりを決定
-    final weights = items.map((e) => e.weight).toList();
-    final total =
-    weights.reduce((a, b) => a + b);
-
-    int r = rand.nextInt(total),
-        acc = 0,
-        idx = 0;
-
-    for (int i = 0; i < weights.length; i++) {
-      acc += weights[i];
-      if (r < acc) {
-        idx = i;
-        break;
-      }
-    }
-
-    // ★ クイック結果モード：アニメなしですぐ結果表示
-    if (widget.quickResult) {
-      setState(() {
-        _spinning = false;
-        _resultName = items[idx].name;
-      });
-      _resultCtrl
-        ..reset()
-        ..forward();
-      await _updateLastAndBumpSaved();
-      return;
-    }
-
-    // ここからは従来のアニメ付きスピン
-    final targetAngle = _targetAngleForIndex(idx);
-    final begin = _angle;
-    final end = begin +
-        _spinsCount * 2 * pi +
-        _normalizeDelta(begin, targetAngle);
-
-    wheelAnim = CurvedAnimation(
-      parent: wheelCtrl,
-      curve: Curves.easeOutCubic,
-    );
-
-    wheelCtrl
-      ..reset()
-      ..addListener(() {
-        setState(() {
-          _angle = begin +
-              (end - begin) * wheelAnim.value;
-        });
-      });
-
-    await wheelCtrl.forward();
-
-    setState(() {
-      _angle = end;
-      _spinning = false;
-      _resultName = items[idx].name;
-    });
-
-    _resultCtrl
-      ..reset()
-      ..forward();
-
-    await _updateLastAndBumpSaved();
-  }
-
-  double _normalizeDelta(double begin, double target) {
-    double d = target - (begin % (2 * pi));
-    while (d < 0) d += 2 * pi;
-    return d;
-  }
-
-  double _targetAngleForIndex(int index) {
-    final items = widget.def.items;
-    final sum = items.fold<int>(
-      0,
-          (s, e) => s + e.weight,
-    );
-
-    double acc = 0;
-    for (int i = 0; i < index; i++) {
-      acc += items[i].weight / sum;
-    }
-
-    final w = items[index].weight / sum;
-    final center = acc + w / 2;
-    double a = -center * 2 * pi;
-    while (a < 0) a += 2 * pi;
-    return a;
-  }
-
-  String _displayName(String s) =>
-      s.runes.length <= 12
-          ? s
-          : String.fromCharCodes(
-        s.runes.take(12),
-      ) +
-          "…";
-
-  Future<void> _updateLastAndBumpSaved() async {
-    final now = DateTime.now().toIso8601String();
-    final d = widget.def;
-
-    final def = RouletteDef(
-      id: d.id,
-      title: d.title,
-      items: d.items,
-      createdAt: d.createdAt,
-      updatedAt: now,
-      lastUsedAt: now,
-      isPinned: d.isPinned,
-    );
-
-    await Store.saveLast(def);
-
-    final saved = await Store.loadSaved();
-    final i = saved.indexWhere((e) => e.id == d.id);
-    if (i >= 0) {
-      saved[i] = def;
-      await Store.saveSaved(saved);
-    }
-  }
-
-  void _resetForNext() {
-    _resultCtrl.reset();
-    setState(() {
-      _resultName = null;
-    });
-
-    // ★ クイック結果モードなら、すぐ次の結果を出す
-    if (widget.quickResult) {
-      _spin();
-    }
-  }
-
-  // SpinPage 内
-
-  Future<void> _saveFromSpinWithDialog() async {
-    // 候補が少なすぎるときは保存させない
-    if (widget.def.items.length < 2) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("候補は2件以上必要です"),
+              );
+            },
           ),
-        );
-      }
-      return;
-    }
-
-    final saved = await Store.loadSaved();
-    final defaultTitle = await _nextDefaultTitleForSave();
-
-    final titleCtl = TextEditingController(text: defaultTitle);
-
-    // タイトル入力ダイアログ
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text("ルーレットを保存"),
-        content: TextField(
-          controller: titleCtl,
-          maxLength: 30,
-          decoration: const InputDecoration(
-            labelText: "タイトル（30文字まで）",
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("キャンセル"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("保存"),
+          const SizedBox(height: 14),
+          const Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              LegendItem('🌟 本目標'),
+              LegendItem('✅ サブ'),
+              LegendItem('🐌🫠 未記録'),
+              LegendItem('☁️ 未達'),
+            ],
           ),
         ],
       ),
     );
+  }
+}
 
-    if (ok != true) return;
+class GoalsPage extends StatelessWidget {
+  const GoalsPage({super.key, required this.appState});
 
-    var title = titleCtl.text.trim().isEmpty
-        ? defaultTitle
-        : titleCtl.text.trim();
+  final AppState appState;
 
-    // タイトル重複時は "◯◯2" "◯◯3" ... にずらす
-    if (saved.any((e) => e.title == title)) {
-      int n = 2;
-      while (saved.any((e) => e.title == "$title$n")) {
-        n++;
-      }
-      title = "$title$n";
-    }
+  @override
+  Widget build(BuildContext context) {
+    final goals = appState.goals;
 
-    final now = DateTime.now().toIso8601String();
-    final d = widget.def;
-
-    // すでに同じIDがあるか（=上書き保存かどうか）
-    final idx = saved.indexWhere((e) => e.id == d.id);
-
-    // まず保存するオブジェクトを構築
-    final def = RouletteDef(
-      id: d.id,
-      title: title,
-      items: List<RouletteItem>.from(d.items),
-      createdAt: idx >= 0 ? saved[idx].createdAt : now,
-      updatedAt: now,
-      lastUsedAt: now,
-      isPinned: idx >= 0 ? saved[idx].isPinned : false,
-    );
-
-    // ===== 1. 既存ルーレットの上書き保存の場合 =====
-    if (idx >= 0) {
-      saved[idx] = def;
-    } else {
-      // ===== 2. 新規保存の場合 =====
-
-      // 上限未満ならそのまま追加
-      if (saved.length < Store.kMaxSavedRoulettes) {
-        saved.insert(0, def);
-      } else {
-        // ここから「上限に達している」ケース
-
-        // お気に入り以外だけ対象にする
-        final candidates =
-        saved.where((e) => !e.isPinned).toList();
-
-        // 全部お気に入りだったら、自動上書きはやめて案内だけ出す
-        if (candidates.isEmpty) {
-          if (mounted) {
-            await showDialog<void>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: const Text('保存上限に達しました'),
-                content: Text(
-                  '保存できるルーレットは最大 '
-                      '${Store.kMaxSavedRoulettes} 個です。\n\n'
-                      '現在保存されているルーレットはすべて「お気に入り」に設定されています。\n'
-                      '新しく保存するには、お気に入りを外すか、どれかを削除してください。',
-                ),
-                actions: [
-                  FilledButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('OK'),
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 18, 16, 24),
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('設定中の目標', style: TextStyle(color: kMuted, fontWeight: FontWeight.w800)),
+                  SizedBox(height: 4),
+                  Text(
+                    '目標',
+                    style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, letterSpacing: -1.6),
                   ),
                 ],
               ),
-            );
-          }
-          return;
-        }
-
-        // lastUsedAt が一番古い（または null ）ものを探す
-        DateTime _parseTime(String? s) {
-          if (s == null || s.isEmpty) {
-            return DateTime.fromMillisecondsSinceEpoch(0);
-          }
-          return DateTime.tryParse(s) ??
-              DateTime.fromMillisecondsSinceEpoch(0);
-        }
-
-        RouletteDef oldest = candidates.first;
-        for (final r in candidates.skip(1)) {
-          if (_parseTime(r.lastUsedAt)
-              .isBefore(_parseTime(oldest.lastUsedAt))) {
-            oldest = r;
-          }
-        }
-
-        // 確認ダイアログ
-        final overwrite = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('保存上限に達しました'),
-            content: Text(
-              '保存できるルーレットは最大 '
-                  '${Store.kMaxSavedRoulettes} 個です。\n\n'
-                  '最近使用していない「${oldest.title}」を\n'
-                  '上書きして保存しますか？',
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: const Text('キャンセル'),
+            RoundIconButton(
+              icon: '+',
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => GoalEditPage(appState: appState)),
               ),
-              FilledButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: const Text('上書き保存'),
-              ),
-            ],
-          ),
-        );
-
-        if (overwrite != true) return;
-
-        // 実際に oldest を置き換える
-        final replaceIndex =
-        saved.indexWhere((e) => e.id == oldest.id);
-        if (replaceIndex >= 0) {
-          saved[replaceIndex] = def;
-        } else {
-          // 念のためのフォールバック
-          saved
-            ..add(def)
-            ..removeAt(0);
-        }
-      }
-    }
-
-    // 保存一覧と「前回のルーレット」を更新
-    await Store.saveSaved(saved);
-    await Store.saveLast(def);
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("保存しました")),
-      );
-    }
-  }
-
-
-
-  Future<String> _nextDefaultTitleForSave() async {
-    final saved = await Store.loadSaved();
-    final used = <int>{};
-
-    final re = RegExp(r'^ルーレット(\d+)$');
-    for (final d in saved) {
-      final m = re.firstMatch(d.title);
-      if (m != null) {
-        final n =
-        int.tryParse(m.group(1) ?? '');
-        if (n != null) used.add(n);
-      }
-    }
-
-    int n = 1;
-    while (used.contains(n)) n++;
-    return "ルーレット$n";
-  }
-
-  // ラジアル文字（SpinPage側で使用）
-  void _paintRadialTextInward(
-      Canvas canvas, {
-        required Offset center,
-        required String text,
-        required double midAngle,
-        required double radiusForMaxWidth,
-        double fontSize = 14,
-        Color fillColor = Colors.white,
-        Color outlineColor = Colors.black,
-        double outlineWidth = 2,
-      }) {
-    final tp = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          fontSize: fontSize,
-          fontWeight: FontWeight.w700,
-          color: fillColor,
-          shadows: const [
-            Shadow(
-              offset: Offset(0, 1),
-              blurRadius: 3,
-              color: Colors.black26,
             ),
           ],
         ),
-      ),
-      textAlign: TextAlign.center,
-      textDirection: TextDirection.ltr,
-      maxLines: 2,
-      ellipsis: "…",
-    )..layout(maxWidth: radiusForMaxWidth);
-
-    canvas.save();
-    canvas.translate(center.dx, center.dy);
-    tp.paint(
-      canvas,
-      Offset(-tp.width / 2, -tp.height / 2),
-    );
-    canvas.restore();
-  }
-
-  // BLOCK5内ユーティリティ（フォールバック描画で使用）
-  Color _shade(
-      Color c, {
-        double lightnessDelta = -0.08,
-      }) {
-    final hsl = HSLColor.fromColor(c);
-    final l = (hsl.lightness + lightnessDelta)
-        .clamp(0.0, 1.0);
-    return hsl.withLightness(l).toColor();
-  }
-
-  void _paintOutlinedText(
-      Canvas canvas, {
-        required Offset center,
-        required String text,
-        double fontSize = 14,
-        Color fillColor = Colors.white,
-        double maxWidth = 120,
-        TextAlign align = TextAlign.center,
-        Color? outlineColor,
-        double? outlineWidth,
-        Color? bgColor,
-      }) {
-    final ow =
-    (outlineWidth ?? (fontSize / 7)).clamp(1.0, 2.2);
-
-    final oc = outlineColor ??
-        ((bgColor != null &&
-            ThemeData.estimateBrightnessForColor(
-              bgColor,
-            ) ==
-                Brightness.dark)
-            ? Colors.white.withOpacity(0.85)
-            : Colors.black.withOpacity(0.9));
-
-    final base = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          fontSize: fontSize,
-          height: 1.1,
-          fontWeight: FontWeight.w600,
-          color: fillColor,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: align,
-      maxLines: 2,
-      ellipsis: "…",
-    )..layout(maxWidth: maxWidth);
-
-    final outline = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: TextStyle(
-          fontSize: fontSize,
-          height: 1.1,
-          fontWeight: FontWeight.w800,
-          color: oc,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-      textAlign: align,
-      maxLines: 2,
-      ellipsis: "…",
-    )..layout(maxWidth: maxWidth);
-
-    final dx = -base.width / 2;
-    final dy = -base.height / 2;
-
-    final offsets = <Offset>[
-      Offset(-ow, 0),
-      Offset(ow, 0),
-      Offset(0, -ow),
-      Offset(0, ow),
-      Offset(-ow, -ow),
-      Offset(-ow, ow),
-      Offset(ow, -ow),
-      Offset(ow, ow),
-    ];
-
-    for (final o in offsets) {
-      outline.paint(
-        canvas,
-        center + Offset(dx, dy) + o,
-      );
-    }
-
-    base.paint(
-      canvas,
-      center + Offset(dx, dy),
+        const SizedBox(height: 18),
+        SummaryStatsCard(appState: appState),
+        const SizedBox(height: 20),
+        const SectionTitle(title: '目標一覧', right: '編集・停止・再開'),
+        if (goals.isEmpty)
+          EmptyPanel(
+            title: 'まだ目標がありません',
+            text: '最初の目標を作りましょう。',
+            buttonText: '＋ 目標を作る',
+            onTap: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => GoalEditPage(appState: appState)),
+            ),
+          )
+        else
+          ...goals.map(
+            (goal) => GoalManageCard(appState: appState, goal: goal),
+          ),
+      ],
     );
   }
+}
 
-  // 画像キャッシュ生成
-  Future<void> _ensureWheelImage(Size size) async {
-    if (_buildingImage) return;
-    if (_wheelImage != null &&
-        _wheelImageSize != null &&
-        (size.width - _wheelImageSize!.width).abs() < 1 &&
-        (size.height - _wheelImageSize!.height)
-            .abs() <
-            1) {
-      return;
-    }
+class SummaryStatsCard extends StatelessWidget {
+  const SummaryStatsCard({super.key, required this.appState});
 
-    _buildingImage = true;
-    try {
-      final items = widget.def.items;
-      final total = items.fold<int>(
-        0,
-            (s, e) => s + e.weight,
-      );
-
-      final dpr = ui.window.devicePixelRatio;
-      final w =
-      (size.width * dpr).toInt().clamp(64, 4096);
-      final h =
-      (size.height * dpr).toInt().clamp(64, 4096);
-
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(
-        recorder,
-        Rect.fromLTWH(
-          0,
-          0,
-          w.toDouble(),
-          h.toDouble(),
-        ),
-      );
-
-      canvas.scale(dpr, dpr);
-
-      final r = (size.shortestSide * 0.44);
-      final center = Offset(
-        size.width / 2,
-        size.height / 2,
-      );
-      final rect = Rect.fromCircle(
-        center: center,
-        radius: r,
-      );
-
-      // 落ち影
-      final shadowPaint = Paint()
-        ..color = Colors.black.withOpacity(0.18)
-        ..maskFilter = ui.MaskFilter.blur(
-          ui.BlurStyle.normal,
-          18,
-        );
-      canvas.drawCircle(
-        center + const Offset(0, 8),
-        r * 0.94,
-        shadowPaint,
-      );
-
-      if (total > 0) {
-        double start = -pi / 2;
-        final segPaint = Paint()
-          ..style = PaintingStyle.fill;
-        final sepPaint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.2
-          ..color = Colors.white.withOpacity(0.85);
-
-        for (final it in items) {
-          final sweep =
-              (it.weight / total) * 2 * pi;
-          final base = Color(it.color);
-
-          segPaint.shader = RadialGradient(
-            colors: [
-              _shade(
-                base,
-                lightnessDelta: -0.05,
-              ),
-              base,
-              _shade(
-                base,
-                lightnessDelta: 0.06,
-              ),
-            ],
-            stops: const [0.0, 0.82, 1.0],
-            center: Alignment.center,
-            radius: 0.98,
-          ).createShader(rect);
-
-          canvas.drawArc(
-            rect,
-            start,
-            sweep,
-            true,
-            segPaint,
-          );
-          canvas.drawArc(
-            rect,
-            start,
-            sweep,
-            true,
-            sepPaint,
-          );
-
-          final frac = it.weight / total;
-          final fs =
-          (12 + (frac * 24)).clamp(12, 20).toDouble();
-          final mid = start + sweep / 2;
-
-          final labelR = r * 0.72;
-          final labelCenter = Offset(
-            center.dx + cos(mid) * labelR,
-            center.dy + sin(mid) * labelR,
-          );
-
-          final segPath = Path()
-            ..moveTo(center.dx, center.dy)
-            ..arcTo(rect, start, sweep, false)
-            ..close();
-
-          final chord =
-              2 * labelR * sin(sweep / 2);
-          final maxW = chord * 0.88;
-
-          canvas.save();
-          canvas.clipPath(segPath);
-          _paintRadialTextInward(
-            canvas,
-            center: labelCenter,
-            text: it.name,
-            midAngle: mid,
-            radiusForMaxWidth: maxW,
-            fontSize: fs,
-            fillColor: Colors.white,
-            outlineColor: Colors.black,
-            outlineWidth:
-            (fs / 7).clamp(1.0, 2.2),
-          );
-          canvas.restore();
-
-          start += sweep;
-        }
-
-        // 外周リム
-        final rimPaint = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 3
-          ..shader = SweepGradient(
-            startAngle: -pi / 2,
-            endAngle: 3 * pi / 2,
-            colors: [
-              Colors.white.withOpacity(0.7),
-              Colors.white.withOpacity(0.0),
-              Colors.black.withOpacity(0.12),
-              Colors.white.withOpacity(0.4),
-            ],
-          ).createShader(rect);
-        canvas.drawCircle(center, r - 1, rimPaint);
-
-        // 白ハブ
-        final hubR = r * 0.45;
-        final hubRect = Rect.fromCircle(
-          center: center,
-          radius: hubR,
-        );
-        final hubPaint = Paint()
-          ..shader = RadialGradient(
-            colors: [
-              Colors.white,
-              Colors.grey.shade200,
-            ],
-            center: const Alignment(-0.15, -0.15),
-            radius: 1.0,
-          ).createShader(hubRect);
-        canvas.drawCircle(center, hubR, hubPaint);
-
-        final hubStroke = Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2
-          ..color = Colors.black.withOpacity(0.10);
-        canvas.drawCircle(center, hubR, hubStroke);
-      }
-
-      final picture = recorder.endRecording();
-      final image =
-      await picture.toImage(w, h);
-
-      _wheelImage?.dispose();
-
-      if (mounted) {
-        setState(() {
-          _wheelImage = image;
-          _wheelImageSize = size;
-        });
-      } else {
-        image.dispose();
-      }
-    } finally {
-      _buildingImage = false;
-    }
-  }
+  final AppState appState;
 
   @override
   Widget build(BuildContext context) {
-    final items = widget.def.items;
-    final sum = items.fold<int>(
-      0,
-          (s, e) => s + e.weight,
-    );
-    final cs = Theme.of(context).colorScheme;
+    final active = appState.activeGoals.length;
+    final totalStamps = appState.records.values.length;
+    final mainCount = appState.records.values.where((r) => r.status == RecordStatus.main).length;
 
-    return Scaffold(
-      appBar: AppBar(
-        automaticallyImplyLeading: true,
-        title: const SizedBox.shrink(),
-      ),
-      body: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: (_spinning || _resultName != null)
-            ? null
-            : _spin,
-        child: Stack(
-          children: [
-            // ① ルーレット本体
-            Column(
-              children: [
-                const SizedBox(height: 12),
-                Expanded(
-                  flex: 8,
-                  child: LayoutBuilder(
-                    builder: (_, c) {
-                      final sz = Size(
-                        c.maxWidth,
-                        c.maxHeight,
-                      );
-                      _ensureWheelImage(sz);
-
-                      final wheelRadius =
-                          sz.shortestSide * 0.44;
-                      final centerY =
-                          sz.height / 2;
-                      final wheelTop =
-                          centerY - wheelRadius;
-
-                      const pointerSize = 44.0;
-                      const gap = 4.0;
-
-                      double pointerTop =
-                          wheelTop -
-                              gap -
-                              pointerSize * 0.95;
-
-                      if (pointerTop < 0) {
-                        pointerTop = 0;
-                      }
-
-                      double tapTop =
-                          pointerTop - 32;
-                      if (tapTop < 0) tapTop = 0;
-
-                      return Stack(
-                        children: [
-                          Align(
-                            alignment:
-                            Alignment.center,
-                            child: _wheelImage !=
-                                null &&
-                                _wheelImageSize !=
-                                    null
-                                ? CustomPaint(
-                              size: sz,
-                              painter:
-                              _ImageWheelPainter(
-                                image:
-                                _wheelImage!,
-                                angle: _angle,
-                              ),
-                            )
-                                : CustomPaint(
-                              size: sz,
-                              painter: _WheelFallbackPainter(
-                                items: items,
-                                total: sum,
-                                angle: _angle,
-                              ),
-                            ),
-
-                          ),
-                          if (!_spinning &&
-                              _resultName == null)
-                            Positioned(
-                              top: tapTop,
-                              left: 0,
-                              right: 0,
-                              child: Center(
-                                child:
-                                ScaleTransition(
-                                  scale: _tapScale,
-                                  child: const Text(
-                                    'TAP!',
-                                    style: TextStyle(
-                                      fontSize: 26,
-                                      fontWeight:
-                                      FontWeight
-                                          .w800,
-                                      color: Color(
-                                        0xFFFFD93D,
-                                      ),
-                                      shadows: [
-                                        Shadow(
-                                          offset:
-                                          Offset(
-                                            0,
-                                            1,
-                                          ),
-                                          blurRadius:
-                                          3,
-                                          color: Colors
-                                              .black26,
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          Positioned(
-                            top: pointerTop,
-                            left: (sz.width -
-                                pointerSize) /
-                                2,
-                            child: SizedBox(
-                              width: pointerSize,
-                              height: pointerSize,
-                              child: CustomPaint(
-                                painter:
-                                _PointerPainterGlow(),
-                              ),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 16),
-              ],
-            ),
-
-            // ② 結果オーバーレイ（ぼかし＋カード＋下のボタンシート）
-            if (_resultName != null)
-              Positioned.fill(
-                child: Stack(
-                  children: [
-                    Positioned.fill(
-                      child: BackdropFilter(
-                        filter: ui.ImageFilter.blur(
-                          sigmaX: 6,
-                          sigmaY: 6,
-                        ),
-                        child: Container(
-                          color: Colors.black
-                              .withOpacity(0.28),
-                        ),
-                      ),
-                    ),
-                    Align(
-                      alignment: const Alignment(0, -0.12), // ★ カード全体を少しだけ上に
-                      child: FadeTransition(
-                        opacity: _cardOpacity,
-                        child: ScaleTransition(
-                          scale: _cardScale,
-                          child: Container(
-                            margin: const EdgeInsets.symmetric(horizontal: 32),
-                            padding: const EdgeInsets.fromLTRB(20, 14, 20, 18),
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(20),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withOpacity(0.18),
-                                  blurRadius: 18,
-                                  offset: const Offset(0, 6),
-                                ),
-                              ],
-                            ),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  '結果',
-                                  style: TextStyle(
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600,
-                                    color: cs.primary,
-                                  ),
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  _displayName(_resultName!),
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontSize: 44,
-                                    fontWeight: FontWeight.w800,
-                                    color: Colors.black87,
-                                    letterSpacing: 0.3,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  '${_resultName!} が当たりました',
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    fontSize: 14,
-                                    color: Colors.black54,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-
-                    Align(
-                      alignment: Alignment.bottomCenter,
-                      child: SlideTransition(
-                        position: _sheetOffset,
-                        child: Container(
-                          width: double.infinity,
-                          padding:
-                          const EdgeInsets
-                              .fromLTRB(
-                            16,
-                            12,
-                            16,
-                            20,
-                          ),
-                          decoration:
-                          BoxDecoration(
-                            color: Colors.white,
-                            borderRadius:
-                            const BorderRadius
-                                .vertical(
-                              top:
-                              Radius.circular(
-                                22,
-                              ),
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black
-                                    .withOpacity(
-                                  0.2,
-                                ),
-                                blurRadius: 18,
-                                offset:
-                                const Offset(
-                                  0,
-                                  -4,
-                                ),
-                              ),
-                            ],
-                          ),
-                          child: SafeArea(
-                            top: false,
-                            child: Column(
-                              mainAxisSize:
-                              MainAxisSize.min,
-                              children: [
-                                // ← この灰色バーを削除！
-                                SizedBox(height: 4), // ★必要ならちょい余白だけ残す
-                                SizedBox(
-                                  width:
-                                  double.infinity,
-                                  height: 52,
-                                  child:
-                                  FilledButton
-                                      .icon(
-                                    onPressed:
-                                    _resetForNext,
-                                    icon: const Icon(
-                                      Icons.refresh,
-                                    ),
-                                    label: const Text(
-                                      'もう一度回す',
-                                    ),
-                                    style: FilledButton
-                                        .styleFrom(
-                                      backgroundColor:
-                                      cs.primary,
-                                      foregroundColor:
-                                      cs.onPrimary,
-                                      textStyle:
-                                      const TextStyle(
-                                        fontSize: 17,
-                                        fontWeight:
-                                        FontWeight
-                                            .w700,
-                                      ),
-                                      shape:
-                                      RoundedRectangleBorder(
-                                        borderRadius:
-                                        BorderRadius
-                                            .circular(
-                                          16,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(
-                                  height: 10,
-                                ),
-                                SizedBox(
-                                  width:
-                                  double.infinity,
-                                  height: 48,
-                                  child: FilledButton
-                                      .tonalIcon(
-                                    onPressed:
-                                    _saveFromSpinWithDialog,
-                                    icon: const Icon(
-                                      Icons.save_alt,
-                                    ),
-                                    label: const Text(
-                                      'ルーレットを保存',
-                                    ),
-                                    style: FilledButton
-                                        .styleFrom(
-                                      backgroundColor: cs
-                                          .primaryContainer,
-                                      foregroundColor: cs
-                                          .onPrimaryContainer,
-                                      textStyle:
-                                      const TextStyle(
-                                        fontSize: 15,
-                                        fontWeight:
-                                        FontWeight
-                                            .w700,
-                                      ),
-                                      shape:
-                                      RoundedRectangleBorder(
-                                        borderRadius:
-                                        BorderRadius
-                                            .circular(
-                                          14,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(
-                                  height: 8,
-                                ),
-                                SizedBox(
-                                  width:
-                                  double.infinity,
-                                  height: 48,
-                                  child: FilledButton
-                                      .tonalIcon(
-                                    onPressed: () {
-                                      Navigator.push(
-                                        context,
-                                        MaterialPageRoute(
-                                          builder: (_) =>
-                                              QuickInputPage(
-                                                initial:
-                                                widget.def,
-                                              ),
-                                        ),
-                                      );
-                                    },
-                                    icon: const Icon(
-                                      Icons
-                                          .edit_outlined,
-                                    ),
-                                    label: const Text(
-                                      'ルーレットを編集',
-                                    ),
-                                    style: FilledButton
-                                        .styleFrom(
-                                      backgroundColor: cs
-                                          .secondaryContainer,
-                                      foregroundColor: cs
-                                          .onSecondaryContainer,
-                                      textStyle:
-                                      const TextStyle(
-                                        fontSize: 15,
-                                        fontWeight:
-                                        FontWeight
-                                            .w700,
-                                      ),
-                                      shape:
-                                      RoundedRectangleBorder(
-                                        borderRadius:
-                                        BorderRadius
-                                            .circular(
-                                          14,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(
-                                  height: 8,
-                                ),
-                                SizedBox(
-                                  width:
-                                  double.infinity,
-                                  height: 48,
-                                  child: FilledButton
-                                      .tonalIcon(
-                                    onPressed: () {
-                                      Navigator.of(
-                                        context,
-                                      ).popUntil(
-                                            (route) =>
-                                        route.isFirst,
-                                      );
-                                    },
-                                    icon: const Icon(
-                                      Icons
-                                          .home_outlined,
-                                    ),
-                                    label: const Text(
-                                      'タイトルへ戻る',
-                                    ),
-                                    style: FilledButton
-                                        .styleFrom(
-                                      backgroundColor:
-                                      Colors.white,
-                                      foregroundColor:
-                                      cs.primary,
-                                      textStyle:
-                                      const TextStyle(
-                                        fontSize: 15,
-                                        fontWeight:
-                                        FontWeight
-                                            .w700,
-                                      ),
-                                      shape:
-                                      RoundedRectangleBorder(
-                                        borderRadius:
-                                        BorderRadius
-                                            .circular(
-                                          14,
-                                        ),
-                                        side: BorderSide(
-                                          color: cs.primary
-                                              .withOpacity(
-                                            0.40,
-                                          ),
-                                          width: 1.2,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // ③ 一番手前：結果表示中だけ上部にバナーを出す
-            if (_resultName != null)
-              Positioned(
-                top: 8,
-                left: 0,
-                right: 0,
-                child: SafeArea(
-                  top: true,
-                  bottom: false,
-                  child: Center(
-                    child: BottomBanner(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 0),
-                    ),
-                  ),
-                ),
-              ),
-
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------- 画像を回すだけの軽量ペインタ ----------
-class _ImageWheelPainter extends CustomPainter {
-  final ui.Image image;
-  final double angle;
-
-  _ImageWheelPainter({
-    required this.image,
-    required this.angle,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final src = Rect.fromLTWH(
-      0,
-      0,
-      image.width.toDouble(),
-      image.height.toDouble(),
-    );
-    final dst = Rect.fromLTWH(
-      0,
-      0,
-      size.width,
-      size.height,
-    );
-    final center = Offset(
-      size.width / 2,
-      size.height / 2,
-    );
-
-    canvas.save();
-    canvas.translate(center.dx, center.dy);
-    canvas.rotate(angle);
-    canvas.translate(-center.dx, -center.dy);
-    canvas.drawImageRect(
-      image,
-      src,
-      dst,
-      Paint()
-        ..isAntiAlias = true
-        ..filterQuality = FilterQuality.low,
-    );
-    canvas.restore();
-  }
-
-  @override
-  bool shouldRepaint(covariant _ImageWheelPainter old) =>
-      old.image != image || old.angle != angle;
-}
-
-// ---------- フォールバック（画像生成中だけ一瞬使う） ----------
-class _WheelFallbackPainter extends CustomPainter {
-  final List<RouletteItem> items;
-  final int total;
-  final double angle;
-
-  const _WheelFallbackPainter({
-    required this.items,
-    required this.total,
-    required this.angle,
-  });
-
-  Color _shade(Color c, {double lightnessDelta = -0.08}) {
-    final hsl = HSLColor.fromColor(c);
-    final l = (hsl.lightness + lightnessDelta).clamp(0.0, 1.0);
-    return hsl.withLightness(l).toColor();
-  }
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final r = size.shortestSide * 0.44;
-    final center = Offset(size.width / 2, size.height / 2);
-    final rect = Rect.fromCircle(center: center, radius: r);
-
-    // 影（SpinPage の画像版とほぼ同じ）
-    final shadowPaint = Paint()
-      ..color = Colors.black.withOpacity(0.18)
-      ..maskFilter = const ui.MaskFilter.blur(
-        ui.BlurStyle.normal,
-        18,
-      );
-    canvas.drawCircle(center + const Offset(0, 8), r * 0.94, shadowPaint);
-
-    if (total <= 0) return;
-
-    // ここで一度キャンバスごと回転させて、angle を反映
-    canvas.save();
-    canvas.translate(center.dx, center.dy);
-    canvas.rotate(angle);
-    canvas.translate(-center.dx, -center.dy);
-
-    double start = -pi / 2;
-    final segPaint = Paint()..style = PaintingStyle.fill;
-    final sepPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.2
-      ..color = Colors.white.withOpacity(0.85);
-
-    for (final it in items) {
-      final sweep = (it.weight / total) * 2 * pi;
-      final base = Color(it.color);
-
-      // グラデーションも画像版と合わせる
-      segPaint.shader = RadialGradient(
-        colors: [
-          _shade(base, lightnessDelta: -0.05),
-          base,
-          _shade(base, lightnessDelta: 0.06),
+    return BaseCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('現在走っている目標', style: TextStyle(color: kMuted, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(child: StatTile(emoji: '🎯', number: '$active', label: '有効')),
+              const SizedBox(width: 8),
+              Expanded(child: StatTile(emoji: '🏷', number: '$totalStamps', label: '累計シール')),
+              const SizedBox(width: 8),
+              Expanded(child: StatTile(emoji: '🌟', number: '$mainCount', label: '本目標')),
+            ],
+          ),
         ],
-        stops: const [0.0, 0.82, 1.0],
-        center: Alignment.center,
-        radius: 0.98,
-      ).createShader(rect);
+      ),
+    );
+  }
+}
 
-      canvas.drawArc(rect, start, sweep, true, segPaint);
-      canvas.drawArc(rect, start, sweep, true, sepPaint);
+class GoalManageCard extends StatelessWidget {
+  const GoalManageCard({
+    super.key,
+    required this.appState,
+    required this.goal,
+  });
 
-      // 文字も同じテイスト（白＋うっすら影）
-      final frac = it.weight / total;
-      final fs = (12 + (frac * 24)).clamp(12, 20).toDouble();
-      final mid = start + sweep / 2;
+  final AppState appState;
+  final Goal goal;
 
-      final labelR = r * 0.72;
-      final labelCenter = Offset(
-        center.dx + cos(mid) * labelR,
-        center.dy + sin(mid) * labelR,
-      );
-      final chord = 2 * labelR * sin(sweep / 2);
-      final maxW = chord * 0.88;
+  @override
+  Widget build(BuildContext context) {
+    final percent = appState.mainPercentLast30(goal);
+    final percentText = '${(percent * 100).round()}%';
+    final main = appState.countMainLast30(goal);
+    final sub = appState.countSubLast30(goal);
+    final streak = appState.streak(goal);
 
-      final tp = TextPainter(
-        text: TextSpan(
-          text: it.name,
-          style: TextStyle(
-            fontSize: fs,
-            fontWeight: FontWeight.w700,
-            color: Colors.white,
-            shadows: const [
-              Shadow(
-                offset: Offset(0, 1),
-                blurRadius: 3,
-                color: Colors.black26,
+    return BaseGoalCard(
+      borderColor: goal.isActive ? const Color(0xFFE6EDF5) : const Color(0xFFE5E7EB),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          GoalCardHeader(
+            name: goal.name,
+            badge: goal.isActive ? '有効' : '停止中',
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  color: kYellow,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                child: Text(
+                  '🔥 $streak日',
+                  style: const TextStyle(fontWeight: FontWeight.w900),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'サブ以上で継続',
+                style: TextStyle(color: kMuted.withOpacity(0.9), fontWeight: FontWeight.w800),
               ),
             ],
           ),
-        ),
-        maxLines: 2,
-        textAlign: TextAlign.center,
-        textDirection: TextDirection.ltr,
-        ellipsis: '…',
-      )..layout(maxWidth: maxW);
-
-      final segPath = Path()
-        ..moveTo(center.dx, center.dy)
-        ..arcTo(rect, start, sweep, false)
-        ..close();
-
-      canvas.save();
-      canvas.clipPath(segPath);
-      canvas.translate(labelCenter.dx, labelCenter.dy);
-      canvas.rotate(mid + pi); // 放射状に内向き
-      tp.paint(
-        canvas,
-        Offset(-tp.width / 2, -tp.height / 2),
-      );
-      canvas.restore();
-
-      start += sweep;
-    }
-
-    canvas.restore(); // ← angle 回転の restore
-
-    // 外周リム
-    final rimPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3
-      ..shader = SweepGradient(
-        startAngle: -pi / 2,
-        endAngle: 3 * pi / 2,
-        colors: [
-          Colors.white.withOpacity(0.7),
-          Colors.white.withOpacity(0.0),
-          Colors.black.withOpacity(0.12),
-          Colors.white.withOpacity(0.4),
+          const SizedBox(height: 14),
+          const Text(
+            '本目標達成率（直近30日）',
+            style: TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 7),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: LinearProgressIndicator(
+              value: percent,
+              minHeight: 12,
+              backgroundColor: const Color(0xFFE5E7EB),
+              color: kBlue,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            '$percentText（$main / 30日）',
+            style: const TextStyle(color: Color(0xFF0369A1), fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Text('🌟 $main', style: const TextStyle(fontWeight: FontWeight.w900)),
+              const SizedBox(width: 14),
+              Text('✅ $sub', style: const TextStyle(fontWeight: FontWeight.w900)),
+            ],
+          ),
+          const SizedBox(height: 14),
+          TargetBox(label: '本目標', text: goal.mainTarget, color: kYellow),
+          const SizedBox(height: 8),
+          TargetBox(label: 'サブ目標', text: goal.subTarget, color: kGreen),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: SecondaryButton(
+                  label: '編集',
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => GoalEditPage(appState: appState, goal: goal),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SecondaryButton(
+                  label: goal.isActive ? '停止' : '再開',
+                  onTap: () async {
+                    if (goal.isActive) {
+                      await appState.stopGoal(goal);
+                    } else {
+                      await appState.resumeGoal(goal);
+                    }
+                  },
+                ),
+              ),
+            ],
+          ),
         ],
-      ).createShader(rect);
-    canvas.drawCircle(center, r - 1, rimPaint);
-
-    // 中央の白丸
-    final hubR = r * 0.45;
-    final hubRect = Rect.fromCircle(center: center, radius: hubR);
-    final hubPaint = Paint()
-      ..shader = RadialGradient(
-        colors: [
-          Colors.white,
-          Colors.grey.shade200,
-        ],
-        center: const Alignment(-0.15, -0.15),
-        radius: 1.0,
-      ).createShader(hubRect);
-    canvas.drawCircle(center, hubR, hubPaint);
-
-    final hubStroke = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..color = Colors.black.withOpacity(0.10);
-    canvas.drawCircle(center, hubR, hubStroke);
+      ),
+    );
   }
-
-  @override
-  bool shouldRepaint(covariant _WheelFallbackPainter old) =>
-      old.items != items || old.total != total || old.angle != angle;
 }
 
-
-// ===== PATCH: pointer painter — tip points DOWN toward the wheel =====
-class _PointerPainterGlow extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final w = size.width, h = size.height;
-
-    final glow = Paint()
-      ..color = Colors.redAccent.withOpacity(0.28)
-      ..style = PaintingStyle.fill
-      ..maskFilter = const MaskFilter.blur(
-        BlurStyle.normal,
-        6,
-      );
-    final fill = Paint()
-      ..color = Colors.redAccent
-      ..style = PaintingStyle.fill;
-    final stroke = Paint()
-      ..color = Colors.white
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
-
-    final path = Path()
-      ..moveTo(w * 0.50, h * 0.95)
-      ..lineTo(w * 0.18, h * 0.20)
-      ..lineTo(w * 0.82, h * 0.20)
-      ..close();
-
-    canvas.drawPath(path, glow);
-    canvas.drawPath(path, fill);
-    canvas.drawPath(path, stroke);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) =>
-      false;
-}
-
-// ===== BLOCK 6: Ads =====
-
-class AdIds {
-  static String get bannerTest {
-    if (kIsWeb) return ''; // webは未対応（空文字で無効化）
-
-    switch (defaultTargetPlatform) {
-      case TargetPlatform.android:
-        return 'ca-app-pub-3940256099942544/6300978111';
-      case TargetPlatform.iOS:
-        return 'ca-app-pub-3940256099942544/2934735716';
-      default:
-        return 'ca-app-pub-3940256099942544/6300978111'; // デフォはAndroid
-    }
-  }
-
-  // 本番ID（ビルド前に差し替え）
-  static String get banner => bannerTest;
-}
-
-/// 画面下に固定するアンカード・アダプティブバナー
-class BottomBanner extends StatefulWidget {
-  /// 画面端からの余白
-  final EdgeInsets padding;
-
-  /// 上側のノッチ / ステータスバーを避けるか
-  final bool safeTop;
-
-  /// 下側のホームバーなどを避けるか
-  final bool safeBottom;
-
-  const BottomBanner({
+class GoalEditPage extends StatefulWidget {
+  const GoalEditPage({
     super.key,
-    this.padding = const EdgeInsets.fromLTRB(16, 0, 16, 8),
-    this.safeTop = false,   // デフォルトは「下に置く想定」なので false
-    this.safeBottom = true, // 下は避ける
+    required this.appState,
+    this.goal,
   });
 
+  final AppState appState;
+  final Goal? goal;
+
   @override
-  State<BottomBanner> createState() => _BottomBannerState();
+  State<GoalEditPage> createState() => _GoalEditPageState();
 }
 
-
-class _BottomBannerState extends State<BottomBanner>
-    with WidgetsBindingObserver {
-  BannerAd? _ad;
-  AdSize? _loadedSize;
-  Orientation? _lastOrientation;
+class _GoalEditPageState extends State<GoalEditPage> {
+  late final TextEditingController name;
+  late final TextEditingController mainTarget;
+  late final TextEditingController subTarget;
+  late final TextEditingController notificationTime;
 
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-
-    // 端末の向きが変わったらサイズを取り直す
-    final ori = MediaQuery.of(context).orientation;
-    if (_lastOrientation != ori) {
-      _lastOrientation = ori;
-      _load();
-    }
-  }
-
-  @override
-  void didChangeMetrics() {
-    // 画面幅が変わる（分割/キーボード/回転）時も安全に張り替え
-    WidgetsBinding.instance.addPostFrameCallback(
-          (_) => _load(),
-    );
-  }
-
-  Future<void> _load() async {
-    if (!mounted) return;
-
-    // 既存を破棄してサイズを取り直す
-    _ad?.dispose();
-    _ad = null;
-    _loadedSize = null;
-
-    // ▼ ここを変更：パディングを引いた幅でサイズを取得
-    final fullWidth =
-        MediaQuery.of(context).size.width;
-    final usableWidth = (fullWidth -
-        widget.padding.horizontal)
-        .clamp(0, double.infinity);
-    final width = usableWidth.truncate();
-    if (width <= 0) return;
-
-    final size =
-    await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(
-      width,
-    );
-    if (!mounted || size == null) return;
-
-    final ad = BannerAd(
-      adUnitId: AdIds.banner,
-      size: size,
-      request: const AdRequest(),
-      listener: BannerAdListener(
-        onAdLoaded: (ad) {
-          if (!mounted) return;
-          setState(() {
-            _ad = ad as BannerAd;
-            _loadedSize = size;
-          });
-        },
-        onAdFailedToLoad: (ad, err) {
-          ad.dispose();
-        },
-      ),
-    );
-
-    await ad.load();
+    final g = widget.goal;
+    name = TextEditingController(text: g?.name ?? '');
+    mainTarget = TextEditingController(text: g?.mainTarget ?? '');
+    subTarget = TextEditingController(text: g?.subTarget ?? '');
+    notificationTime = TextEditingController(text: g?.notificationTime ?? '21:00');
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _ad?.dispose();
+    name.dispose();
+    mainTarget.dispose();
+    subTarget.dispose();
+    notificationTime.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_ad == null || _loadedSize == null) {
-      return const SizedBox.shrink();
-    }
+    final isEdit = widget.goal != null;
 
-    return SafeArea(
-      top: widget.safeTop,
-      bottom: widget.safeBottom,
-      child: Padding(
-        padding: widget.padding,
-        child: SizedBox(
-          width: double.infinity,
-          height: _loadedSize!.height.toDouble(),
-          child: Align(
-            alignment: Alignment.center,
-            child: AdWidget(ad: _ad!),
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        backgroundColor: kBg,
+        title: Text(isEdit ? '目標を編集' : '目標を作る'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+        children: [
+          BaseCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '1目標 = 本目標 + 絶対できるサブ目標',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                ),
+                const SizedBox(height: 14),
+                AppTextField(
+                  controller: name,
+                  label: '目標名',
+                  hint: '例：筋トレ',
+                ),
+                const SizedBox(height: 12),
+                AppTextField(
+                  controller: mainTarget,
+                  label: '本目標',
+                  hint: '例：30分筋トレ',
+                ),
+                const SizedBox(height: 12),
+                AppTextField(
+                  controller: subTarget,
+                  label: 'サブ目標',
+                  hint: '例：1分筋トレ',
+                ),
+                const SizedBox(height: 12),
+                AppTextField(
+                  controller: notificationTime,
+                  label: '通知時間',
+                  hint: '例：21:00',
+                ),
+                const SizedBox(height: 18),
+                FilledButton(
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(52),
+                    backgroundColor: kText,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+                  ),
+                  onPressed: () async {
+                    final n = name.text.trim();
+                    final m = mainTarget.text.trim();
+                    final s = subTarget.text.trim();
+                    final t = notificationTime.text.trim();
+
+                    if (n.isEmpty || m.isEmpty || s.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('目標名・本目標・サブ目標を入力してください')),
+                      );
+                      return;
+                    }
+
+                    if (isEdit) {
+                      final goal = widget.goal!;
+                      goal.name = n;
+                      goal.mainTarget = m;
+                      goal.subTarget = s;
+                      goal.notificationTime = t.isEmpty ? '21:00' : t;
+                      await widget.appState.updateGoal(goal);
+                    } else {
+                      await widget.appState.addGoal(
+                        name: n,
+                        mainTarget: m,
+                        subTarget: s,
+                        notificationTime: t.isEmpty ? '21:00' : t,
+                      );
+                    }
+
+                    if (context.mounted) Navigator.pop(context);
+                  },
+                  child: Text(isEdit ? '保存する' : '作成する'),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+Future<void> openMemoSheet({
+  required BuildContext context,
+  required String title,
+  required String emoji,
+  required Future<void> Function(String memo) onSave,
+}) async {
+  final controller = TextEditingController();
+
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.white,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+    ),
+    builder: (context) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          18,
+          16,
+          MediaQuery.of(context).viewInsets.bottom + 18,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 38)),
+            const SizedBox(height: 8),
+            Text(title, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 14),
+            TextField(
+              controller: controller,
+              minLines: 2,
+              maxLines: 4,
+              decoration: InputDecoration(
+                hintText: '一言メモ（任意）',
+                filled: true,
+                fillColor: const Color(0xFFF8FAFC),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(52),
+                backgroundColor: kText,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              ),
+              onPressed: () async {
+                await onSave(controller.text.trim());
+                if (context.mounted) Navigator.pop(context);
+              },
+              child: const Text('記録する'),
+            ),
+            TextButton(
+              onPressed: () async {
+                await onSave('');
+                if (context.mounted) Navigator.pop(context);
+              },
+              child: const Text('メモなしで記録'),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  controller.dispose();
+}
+
+Future<void> openRecordEditSheet({
+  required BuildContext context,
+  required AppState appState,
+  required Goal goal,
+  required String dayKey,
+}) async {
+  final current = appState.recordFor(goal.id, dayKey);
+  final memo = TextEditingController(text: current?.memo ?? '');
+
+  Future<void> save(RecordStatus status, {String? autoStamp}) async {
+    await appState.upsertRecord(
+      goalId: goal.id,
+      dayKey: dayKey,
+      status: status,
+      memo: memo.text.trim(),
+      autoStamp: autoStamp,
+    );
+    if (context.mounted) Navigator.pop(context);
+  }
+
+  await showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.white,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+    ),
+    builder: (context) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          18,
+          16,
+          MediaQuery.of(context).viewInsets.bottom + 18,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(dayKey, style: const TextStyle(color: kMuted, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            Text(goal.name, style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 14),
+            TextField(
+              controller: memo,
+              minLines: 2,
+              maxLines: 4,
+              decoration: InputDecoration(
+                hintText: '一言メモ（任意）',
+                filled: true,
+                fillColor: const Color(0xFFF8FAFC),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(18),
+                  borderSide: BorderSide.none,
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: StampButton(
+                    emoji: '🌟',
+                    label: '本目標',
+                    color: kYellow,
+                    onTap: () => save(RecordStatus.main),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: StampButton(
+                    emoji: '✅',
+                    label: 'サブ',
+                    color: kGreen,
+                    onTap: () => save(RecordStatus.sub),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: StampButton(
+                    emoji: '☁️',
+                    label: '未達',
+                    color: kGray,
+                    onTap: () => save(RecordStatus.miss),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: kAutoStamps.map((stamp) {
+                return ActionChip(
+                  label: Text('$stamp 未記録'),
+                  onPressed: () => save(RecordStatus.auto, autoStamp: stamp),
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+      );
+    },
+  );
+
+  memo.dispose();
+}
+
+class BaseCard extends StatelessWidget {
+  const BaseCard({
+    super.key,
+    required this.child,
+    this.borderColor,
+  });
+
+  final Widget child;
+  final Color? borderColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: borderColor ?? Colors.transparent, width: 2),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF141E32).withOpacity(0.08),
+            blurRadius: 28,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(18),
+      child: child,
+    );
+  }
+}
+
+class BaseGoalCard extends StatelessWidget {
+  const BaseGoalCard({
+    super.key,
+    required this.child,
+    this.borderColor,
+  });
+
+  final Widget child;
+  final Color? borderColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: BaseCard(
+        borderColor: borderColor ?? const Color(0xFFE6EDF5),
+        child: child,
+      ),
+    );
+  }
+}
+
+class GoalCardHeader extends StatelessWidget {
+  const GoalCardHeader({
+    super.key,
+    required this.name,
+    required this.badge,
+  });
+
+  final String name;
+  final String badge;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            name,
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w900, letterSpacing: -1.0),
+          ),
+        ),
+        Container(
+          decoration: BoxDecoration(
+            color: kGray,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+          child: Text(
+            badge,
+            style: const TextStyle(color: kMuted, fontSize: 12, fontWeight: FontWeight.w900),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class TargetBox extends StatelessWidget {
+  const TargetBox({
+    super.key,
+    required this.label,
+    required this.text,
+    required this.color,
+  });
+
+  final String label;
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(18)),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 3),
+          Text(text, style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w900)),
+        ],
+      ),
+    );
+  }
+}
+
+class StampButton extends StatelessWidget {
+  const StampButton({
+    super.key,
+    required this.emoji,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final String emoji;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: color,
+      borderRadius: BorderRadius.circular(17),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(17),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 4),
+          child: Column(
+            children: [
+              Text(emoji, style: const TextStyle(fontSize: 23)),
+              const SizedBox(height: 2),
+              Text(label, style: const TextStyle(fontWeight: FontWeight.w900)),
+            ],
           ),
         ),
       ),
     );
   }
+}
 
+class SecondaryButton extends StatelessWidget {
+  const SecondaryButton({
+    super.key,
+    required this.label,
+    required this.onTap,
+  });
 
+  final String label;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: kGray,
+      borderRadius: BorderRadius.circular(17),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(17),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 13),
+          child: Center(
+            child: Text(label, style: const TextStyle(fontWeight: FontWeight.w900)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class RoundIconButton extends StatelessWidget {
+  const RoundIconButton({
+    super.key,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final String icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: kText,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: SizedBox(
+          width: 48,
+          height: 48,
+          child: Center(
+            child: Text(icon, style: const TextStyle(color: Colors.white, fontSize: 30)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class SummaryCard extends StatelessWidget {
+  const SummaryCard({
+    super.key,
+    required this.title,
+    required this.big,
+    required this.suffix,
+    required this.caption,
+  });
+
+  final String title;
+  final String big;
+  final String suffix;
+  final String caption;
+
+  @override
+  Widget build(BuildContext context) {
+    return BaseCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(color: kMuted, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          RichText(
+            text: TextSpan(
+              style: const TextStyle(color: kText),
+              children: [
+                TextSpan(
+                  text: big,
+                  style: const TextStyle(fontSize: 44, fontWeight: FontWeight.w900),
+                ),
+                TextSpan(
+                  text: ' $suffix',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(caption, style: const TextStyle(color: kMuted, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+}
+
+class SectionTitle extends StatelessWidget {
+  const SectionTitle({
+    super.key,
+    required this.title,
+    required this.right,
+  });
+
+  final String title;
+  final String right;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 0, 4, 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, letterSpacing: -0.8),
+            ),
+          ),
+          Text(
+            right,
+            style: const TextStyle(fontSize: 12, color: kMuted, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class EmptyPanel extends StatelessWidget {
+  const EmptyPanel({
+    super.key,
+    required this.title,
+    required this.text,
+    this.buttonText,
+    this.onTap,
+  });
+
+  final String title;
+  final String text;
+  final String? buttonText;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return BaseCard(
+      child: Column(
+        children: [
+          Text(title, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+          const SizedBox(height: 8),
+          Text(
+            text,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: kMuted, fontWeight: FontWeight.w800, height: 1.45),
+          ),
+          if (buttonText != null) ...[
+            const SizedBox(height: 14),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: kText,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+              ),
+              onPressed: onTap,
+              child: Text(buttonText!),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class StatTile extends StatelessWidget {
+  const StatTile({
+    super.key,
+    required this.emoji,
+    required this.number,
+    required this.label,
+  });
+
+  final String emoji;
+  final String number;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(18)),
+      padding: const EdgeInsets.symmetric(vertical: 11, horizontal: 4),
+      child: Column(
+        children: [
+          Text(emoji, style: const TextStyle(fontSize: 21)),
+          Text(number, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900)),
+          Text(label, style: const TextStyle(fontSize: 10, color: kMuted, fontWeight: FontWeight.w900)),
+        ],
+      ),
+    );
+  }
+}
+
+class Dow extends StatelessWidget {
+  const Dow(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Text(
+        text,
+        style: const TextStyle(fontSize: 11, color: Color(0xFF94A3B8), fontWeight: FontWeight.w900),
+      ),
+    );
+  }
+}
+
+class LegendItem extends StatelessWidget {
+  const LegendItem(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(color: const Color(0xFFF8FAFC), borderRadius: BorderRadius.circular(16)),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: Text(
+        text,
+        style: const TextStyle(color: Color(0xFF475569), fontSize: 12, fontWeight: FontWeight.w900),
+      ),
+    );
+  }
+}
+
+class AppTextField extends StatelessWidget {
+  const AppTextField({
+    super.key,
+    required this.controller,
+    required this.label,
+    required this.hint,
+  });
+
+  final TextEditingController controller;
+  final String label;
+  final String hint;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      decoration: InputDecoration(
+        labelText: label,
+        hintText: hint,
+        filled: true,
+        fillColor: const Color(0xFFF8FAFC),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(18),
+          borderSide: BorderSide.none,
+        ),
+      ),
+    );
+  }
 }
